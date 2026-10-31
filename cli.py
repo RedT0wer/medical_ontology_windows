@@ -505,7 +505,7 @@ def main():
         "--output-dir",
         "-o",
         type=str,
-        default="analysis_output",
+        default="_output",
         help="Папка для сохранения нормализованных JSON файлов",
     )
     p_proc.add_argument(
