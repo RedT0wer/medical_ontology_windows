@@ -1,7 +1,8 @@
-"""Модуль извлечения структурированных клинических данных и административной информации из медицинских протоколов с помощью LLM (Qwen).
+"""Модуль извлечения структурированных клинических данных и метаданных из медицинских протоколов с помощью LLM (Qwen).
 
-Преобразует неструктурированный текст протокола (например, УЗИ ОБП)
-в иерархический ExtractedDocument (шапка + дерево признаков + заключение).
+Преобразует неструктурированный текст протокола (лист консультативного осмотра, протокол УЗИ, ЭКГ, выписка)
+в иерархический ExtractedDocument на основе общеклинической методологии извлечения.
+Извлечение всех сущностей и паспортной части выполняется строго через языковую модель.
 """
 
 import json
@@ -17,33 +18,33 @@ class AdministrativeInfo(BaseModel):
 
     institution: str = Field(default="---", description="Название медицинского учреждения")
     patient: str = Field(default="---", description="ФИО пациента")
-    age: Optional[int] = Field(default=None, description="Возраст пациента (число)")
-    date_of_birth: Optional[str] = Field(default=None, description="Дата рождения (YYYY-MM-DD)")
+    age: Optional[int] = Field(default=None, description="Возраст пациента (целое число)")
+    date_of_birth: Optional[str] = Field(default=None, description="Дата рождения в формате ISO (YYYY-MM-DD)")
     address: str = Field(default="---", description="Адрес пациента")
-    consultation_date: Optional[str] = Field(default=None, description="Дата и время осмотра (ISO 8601)")
+    consultation_date: Optional[str] = Field(default=None, description="Дата и время осмотра в формате ISO (YYYY-MM-DDTHH:MM)")
     examination: str = Field(
-        default="ультразвуковое_исследование_органов_брюшной_полости",
-        description="Название исследования (snake_case)",
+        default="лист_консультативного_осмотра",
+        description="Канонический тип исследования/осмотра в snake_case",
     )
     doctor: str = Field(default="---", description="ФИО врача")
     specialization: str = Field(
-        default="ультразвуковая_диагностика",
-        description="Специальность врача",
+        default="терапия",
+        description="Специальность врача в snake_case",
     )
 
 
 class ExtractedEntity(BaseModel):
     """Модель атомарного извлеченного клинического признака/измерения."""
 
-    raw_key: str = Field(..., description="Исходное название признака или узла (например, right_lobe, wall)")
+    raw_key: str = Field(..., description="Исходное название признака или узла (например, right_lobe, wall, heart_rate)")
     raw_value: Any = Field(..., description="Значение параметра (число, строка, массив)")
     context: str = Field(default="", description="Контекстное предложение или цитата из текста")
     path_hint: Optional[str] = Field(
         default=None,
-        description="Иерархический путь в целевом JSON (например, liver.right_lobe, liver.gallbladder.wall)",
+        description="Иерархический путь в целевом JSON (например, liver.right_lobe, liver.gallbladder.wall, vitals.heart_rate)",
     )
-    category: Optional[str] = Field(default=None, description="Анатомическая категория или орган (например, liver, pancreas)")
-    unit: Optional[str] = Field(default=None, description="Единица измерения (например, мм, см, лет)")
+    category: Optional[str] = Field(default=None, description="Анатомическая категория или орган (например, liver, pancreas, vitals)")
+    unit: Optional[str] = Field(default=None, description="Единица измерения (например, мм, см, уд/мин, мм рт. ст.)")
     data_type: Optional[str] = Field(
         default="string",
         description="Тип данных (integer, float, string, dimension_2d, array)",
@@ -61,7 +62,7 @@ class ExtractedDocument(BaseModel):
 
 
 class EntityExtractor:
-    """Сервис извлечения иерархических клинических параметров и метаданных из текста протокола."""
+    """Сервис структурирования произвольных медицинских текстов на базе методологического LLM-извлечения."""
 
     ADMIN_KEYS = {
         "institution",
@@ -76,63 +77,45 @@ class EntityExtractor:
     }
 
     SYSTEM_PROMPT = (
-        "Ты — высококвалифицированный медицинский эксперт и специалист по структурированию данных протоколов осмотра (УЗИ, КТ, выписки).\n"
-        "Твоя задача — извлечь из текста протокола всю информацию и вернуть СТРОГО валидный JSON в следующем эталонном формате:\n\n"
-        "{\n"
-        '  "institution": "Название клиники или ---",\n'
-        '  "patient": "ФИО пациента или ---",\n'
-        '  "age": 94,\n'
-        '  "date_of_birth": "1927-10-15",\n'
-        '  "address": "---",\n'
-        '  "consultation_date": "2022-04-22T16:24",\n'
-        '  "examination": "ультразвуковое_исследование_органов_брюшной_полости",\n'
-        '  "liver": {\n'
-        '    "right_lobe": 152,\n'
-        '    "left_lobe": 67,\n'
-        '    "parenchyma": "диффузно_неоднородная, повышенной_эхогенности",\n'
-        '    "vascular_tissue": "обеднена",\n'
-        '    "bile_ducts": "не_расширены",\n'
-        '    "gallbladder": {\n'
-        '      "size": "65  х  28 мм",\n'
-        '      "wall": 3,\n'
-        '      "form": "правильная",\n'
-        '      "intrahepatic_choledochal_system": "гиперэхогенные_образования_до_14 мм"\n'
-        '    },\n'
-        '    "pancreas": {\n'
-        '      "head": 25,\n'
-        '      "body": 14,\n'
-        '      "tail": 24,\n'
-        '      "structure": "однородная, эхогенность_повышена, контуры_нечеткие"\n'
-        '    },\n'
-        '    "spleen": {\n'
-        '      "size": "94  х  34 мм",\n'
-        '      "structure": "однородная",\n'
-        '      "vein": "не_расширена"\n'
-        '    },\n'
-        '    "free_liquid_in_abdomen": "не_визуализируется",\n'
-        '    "paraaortic_lymph_nodes": "не_изменены"\n'
-        '  },\n'
-        '  "right_kidney": {\n'
-        '    "calyx": 20,\n'
-        '    "pelvis": 42,\n'
-        '    "parenchyma": 8\n'
-        '  },\n'
-        '  "conclusion": [\n'
-        '    "жкб",\n'
-        '    "диффузные_изменения_в_печени",\n'
-        '    "гидронефроз_справа"\n'
-        '  ],\n'
-        '  "doctor": "---",\n'
-        '  "specialization": "ультразвуковая_диагностика"\n'
-        "}\n\n"
-        "Правила:\n"
-        "1. Ключи органов и структур пиши строго в snake_case латиницей (liver, gallbladder, pancreas, spleen, right_kidney, left_kidney и т.д.).\n"
-        "2. Числовые измерения (толщина, доли, диаметры) записывай числами БЕЗ единиц (например: right_lobe: 152, wall: 3).\n"
-        "3. Габаритные размеры двухмерные пиши строкой: \"65  х  28 мм\".\n"
-        "4. Качественные характеристики пиши в нижнем регистре через snake_case или запятую (\"диффузно_неоднородная, повышенной_эхогенности\").\n"
-        "5. Отсутствие признака/норму отражай лаконично (\"не_расширены\", \"не_визуализируется\").\n"
-        "6. В \"conclusion\" включи массив всех диагнозов и синдромов в нижнем регистре.\n"
-        "7. Верни СТРОГО JSON без markdown-разметки и пояснений."
+        "Ты — ведущий медицинский эксперт-онтолог и специалист по извлечению данных из клинических документов "
+        "(листов консультативного осмотра, протоколов инструментальных исследований, выписок, карт стационарного больного).\n\n"
+        "Твоя задача — проанализировать неструктурированный медицинский текст на русском языке и преобразовать его "
+        "в строго структурированный валидный JSON-документ единого формата.\n\n"
+        "### МЕТОДОЛОГИЯ И ПРИНЦИПЫ ИЗВЛЕЧЕНИЯ:\n\n"
+        "1. АДМИНИСТРАТИВНЫЙ БЛОК (Паспортные данные и метаданные осмотра):\n"
+        "Извлеки из текста метаданные (если поле отсутствует или замаскировано '---', сохрани '---' для строк или null для чисел):\n"
+        "- \"institution\": наименование медицинской организации (строка или '---')\n"
+        "- \"patient\": ФИО пациента (строка или '---')\n"
+        "- \"age\": возраст пациента строго целым числом (например: 94 или null)\n"
+        "- \"date_of_birth\": дата рождения строго в формате ISO 'YYYY-MM-DD' (например: '1927-10-15' или null)\n"
+        "- \"address\": адрес пациента (строка или '---')\n"
+        "- \"consultation_date\": дата и время осмотра/исследования в формате ISO 'YYYY-MM-DDTHH:MM' (например: '2022-04-22T15:11' или null)\n"
+        "- \"examination\": тип исследования или осмотра на латинице в snake_case (например: 'лист_консультативного_осмотра', 'ультразвуковое_исследование_органов_брюшной_полости', 'электрокардиографическое_исследование', 'первичный_осмотр_хирурга')\n"
+        "- \"doctor\": ФИО врача (строка или '---')\n"
+        "- \"specialization\": специальность врача на латинице в snake_case (например: 'ультразвуковая_диагностика', 'хирургия', 'функциональная_диагностика', 'терапия')\n\n"
+        "2. ИЕРАРХИЧЕСКОЕ ДЕРЕВО КЛИНИЧЕСКИХ ПРИЗНАКОВ (Анатомические системы, органы и измерения):\n"
+        "Все описанные в тексте показатели, симптомы и инструментальные находки разложи по иерархическим блокам:\n"
+        "- Ключи верхнего уровня: названия анатомических систем, органов или функциональных блоков строго на латинице в snake_case "
+        "(например: liver, gallbladder, pancreas, spleen, kidneys, right_kidney, left_kidney, cardiovascular_system, respiratory_system, digestive_system, vitals, ecg, endoscopy и т.д.).\n"
+        "- Анатомическая вложенность: если структура является анатомической частью органа "
+        "(например: желчный пузырь внутри печени/билиарной системы, чашечки/лоханка внутри почки, доли внутри печени/легких, отделы внутри сердца), "
+        "структурируй их как вложенные словари: 'орган' -> 'подструктура' -> 'параметр'.\n"
+        "- Имена параметров (листьев дерева): лаконичные клинические термины в snake_case "
+        "(например: right_lobe, wall, size, heart_rate, blood_pressure, parenchyma, structure, vessels, calyx, pelvis).\n\n"
+        "3. ПРАВИЛА ТИПИЗАЦИИ ЗНАЧЕНИЙ (Критически важно для формирования признакового датасета):\n"
+        "- Числовые измерения (размеры, толщина, пульс, ЧДД, фракция выброса, лабораторные параметры, температура): "
+        "извлекай СТРОГО ЧИСЛАМИ (int или float) БЕЗ указания единиц измерения (например: 152, 67, 3, 100, 36.6, 0.06).\n"
+        "- Многомерные габариты (двухмерные или трехмерные размеры органов): "
+        "сохраняй как каноническую строку (например: '65 х 28 мм', '9 х 8 х 7 см').\n"
+        "- Качественные характеристики (эхогенность, структура, форма, характер дыхания, ритмичность): "
+        "нормализуй в нижний регистр на русском языке через запятую или snake_case "
+        "(например: 'диффузно_неоднородная, повышенной_эхогенности', 'приглушенные, ритмичные', 'везикулярное, хрипов_нет').\n"
+        "- Отрицательные находки и отсутствие патологии: фиксируй лаконичной формулировкой (например: 'не_расширены', 'не_пальпируется', 'без_онкопатологии', 'хрипов_нет').\n\n"
+        "4. КЛИНИЧЕСКОЕ ЗАКЛЮЧЕНИЕ И ДИАГНОЗЫ ('conclusion'):\n"
+        "Массив строк со всеми установленными основными диагнозами, синдромами, осложнениями и сопутствующими патологиями в нижнем регистре на русском языке:\n"
+        "[\"множественные_язвы_дпк\", \"состоявшееся_желудочное_кровотечение\", \"ибс\", \"желчекаменная_болезнь\", \"диффузные_изменения_в_печени\"]\n\n"
+        "5. ФОРМАТ ВЫВОДА:\n"
+        "Верни СТРОГО валидный JSON-объект без пояснительного текста, преамбул и markdown-разметки."
     )
 
     def __init__(self):
@@ -141,14 +124,12 @@ class EntityExtractor:
         logger.info(f"Инициализация EntityExtractor (провайдер: {self.provider}, модель: {self.model})")
 
     def _clean_json_response(self, raw_text: str) -> Dict[str, Any]:
-        """Очистка от markdown-блоков, обрезки и парсинг JSON."""
+        """Очистка от markdown-тегов и устойчивый парсинг JSON."""
         cleaned = raw_text.strip()
-        # Удаление markdown блоков ```json ... ```
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.MULTILINE)
         cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.MULTILINE)
         cleaned = cleaned.strip()
 
-        # Восстановление незавершенных скобок
         if not cleaned.endswith("}"):
             open_braces = cleaned.count("{") - cleaned.count("}")
             if open_braces > 0:
@@ -157,15 +138,13 @@ class EntityExtractor:
         try:
             data = json.loads(cleaned)
             if isinstance(data, dict):
-                # Если LLM обернула ответ в {"data": ...} или {"result": ...}
-                for wrap_key in ("data", "result", "protocol", "response"):
+                for wrap_key in ("data", "result", "protocol", "response", "document"):
                     if wrap_key in data and isinstance(data[wrap_key], dict) and len(data) == 1:
                         data = data[wrap_key]
                 return data
             return {}
         except json.JSONDecodeError as e:
-            logger.warning(f"Ошибка прямого JSONDecodeError: {e}. Применяем эвристический парсинг.")
-            # Попытка найти JSON блок между первой { и последней }
+            logger.warning(f"Ошибка парсинга JSON: {e}. Попытка извлечения среза скобок.")
             start = cleaned.find("{")
             end = cleaned.rfind("}")
             if start != -1 and end != -1 and end > start:
@@ -187,7 +166,7 @@ class EntityExtractor:
             "options": {
                 "temperature": 0.1,
                 "num_thread": 10,
-                "num_predict": 2048,
+                "num_predict": 2500,
             },
         }
         response = requests.post(url, json=payload, timeout=300)
@@ -217,40 +196,38 @@ class EntityExtractor:
         return response.choices[0].message.content
 
     def _find_context_snippet(self, text: str, search_terms: List[str]) -> str:
-        """Поиск контекстного предложения в исходном тексте по совпадению терминов."""
-        sentences = re.split(r"[.\n;]+", text)
+        """Поиск контекстного предложения в исходном тексте для трассировки (lineage)."""
+        sentences = [s.strip() for s in text.replace("\r\n", "\n").split("\n") if s.strip()]
         for term in search_terms:
             if not term or len(str(term)) < 2:
                 continue
             str_term = str(term).lower()
             for s in sentences:
                 if str_term in s.lower():
-                    snippet = s.strip()
-                    if snippet:
-                        return snippet
-        return text[:120].strip()
+                    return s[:200]
+        return text[:150].strip()
 
     def _infer_type_and_unit(self, key_name: str, value: Any) -> Tuple[str, Optional[str]]:
-        """Определение типа данных и единицы измерения по значению и имени ключа."""
+        """Определение типа данных и единицы измерения по структуре значения."""
         if isinstance(value, bool):
             return "boolean", None
         if isinstance(value, int):
             unit = "мм" if any(k in key_name for k in ("lobe", "wall", "head", "body", "tail", "size", "calyx", "pelvis", "parenchyma")) else None
+            if "rate" in key_name or "pulse" in key_name or "chss" in key_name:
+                unit = "уд/мин"
             return "integer", unit
         if isinstance(value, float):
-            return "float", "мм"
+            return "float", "мм" if "temp" not in key_name else "°C"
         if isinstance(value, list):
             return "array", None
         if isinstance(value, str):
             val_str = value.strip()
-            # Проверка двухмерного габарита вида "65 х 28 мм"
-            if re.search(r"\d+\s*[xхXХ×]\s*\d+", val_str):
+            # Проверка двухмерного/трехмерного габарита ("65 х 28 мм", "9*8*7 см")
+            if re.search(r"\d+\s*[*xхXХ×]\s*\d+", val_str):
                 return "dimension_2d", "мм"
-            # Проверка чистого числа в строке
-            if re.match(r"^-?\d+$", val_str):
-                return "integer", "мм"
-            if re.match(r"^-?\d+\.\d+$", val_str):
-                return "float", "мм"
+            # Если число пришло в виде строки
+            if val_str.isdigit():
+                return "integer", None
             return "string", None
         return "object", None
 
@@ -260,7 +237,7 @@ class EntityExtractor:
         raw_text: str,
         prefix: str = "",
     ) -> List[ExtractedEntity]:
-        """Рекурсивное разворачивание дерева органов и измерений в список атомарных признаков."""
+        """Рекурсивное разворачивание извлеченного дерева органов и измерений в список атомарных признаков."""
         items: List[ExtractedEntity] = []
 
         for key, value in tree.items():
@@ -270,13 +247,11 @@ class EntityExtractor:
             full_path = f"{prefix}.{key}" if prefix else key
 
             if isinstance(value, dict):
-                # Вложенный объект/структура (например, gallbladder внутри liver)
                 items.extend(self._flatten_clinical_tree(value, raw_text, prefix=full_path))
             else:
                 data_type, unit = self._infer_type_and_unit(key, value)
                 context = self._find_context_snippet(raw_text, [str(value), key.replace("_", " ")])
 
-                # Нормализация числовых значений
                 norm_value = value
                 if data_type == "integer":
                     try:
@@ -304,18 +279,21 @@ class EntityExtractor:
         return items
 
     def _parse_administrative(self, data: Dict[str, Any], patient_id: str) -> AdministrativeInfo:
-        """Извлечение и валидация административной шапки."""
+        """Валидация извлеченной моделью административной шапки."""
         raw_age = data.get("age")
         norm_age: Optional[int] = None
         if raw_age is not None:
-            if isinstance(raw_age, int):
-                norm_age = raw_age
-            elif isinstance(raw_age, str):
-                match = re.search(r"\d+", raw_age)
-                if match:
-                    norm_age = int(match.group(0))
+            try:
+                norm_age = int(raw_age)
+            except (ValueError, TypeError):
+                pass
 
-        patient_name = data.get("patient") or patient_id or "---"
+        raw_patient = data.get("patient")
+        patient_name = (
+            raw_patient
+            if raw_patient and raw_patient != "---"
+            else (patient_id if patient_id != "неизвестно" else "---")
+        )
 
         return AdministrativeInfo(
             institution=str(data.get("institution") or "---"),
@@ -324,19 +302,19 @@ class EntityExtractor:
             date_of_birth=data.get("date_of_birth"),
             address=str(data.get("address") or "---"),
             consultation_date=data.get("consultation_date"),
-            examination=str(data.get("examination") or "ультразвуковое_исследование_органов_брюшной_полости"),
+            examination=str(data.get("examination") or "лист_консультативного_осмотра"),
             doctor=str(data.get("doctor") or "---"),
-            specialization=str(data.get("specialization") or "ультразвуковая_диагностика"),
+            specialization=str(data.get("specialization") or "терапия"),
         )
 
     def extract_document(self, text: str, patient_id: str = "неизвестно") -> ExtractedDocument:
-        """Главный метод извлечения: возвращает полный иерархический ExtractedDocument."""
+        """Главный метод извлечения: передает протокол в LLM и парсит возвращенную структуру."""
         if not text or not text.strip():
-            logger.warning(f"Получен пустой текст анкеты для пациента {patient_id}.")
+            logger.warning(f"Получен пустой текст протокола для пациента {patient_id}.")
             return ExtractedDocument()
 
-        logger.info(f"Извлечение иерархических признаков через LLM (пациент {patient_id}, длина: {len(text)} симв.)...")
-        prompt = f"Текст медицинского протокола исследования:\n\"\"\"\n{text.strip()}\n\"\"\""
+        logger.info(f"Извлечение признаков через LLM (пациент {patient_id}, длина: {len(text)} симв.)...")
+        prompt = f"Текст медицинского протокола осмотра / исследования:\n\"\"\"\n{text.strip()}\n\"\"\""
 
         try:
             if self.provider == "ollama":
@@ -346,41 +324,22 @@ class EntityExtractor:
 
             data = self._clean_json_response(raw_response)
 
-            # Если LLM вернула старый плоский формат {"parameters": [...]}
-            if "parameters" in data and isinstance(data["parameters"], list) and len(data) == 1:
-                entities = []
-                for p in data["parameters"]:
-                    entities.append(
-                        ExtractedEntity(
-                            raw_key=p.get("raw_key", ""),
-                            raw_value=p.get("raw_value", ""),
-                            context=p.get("context", ""),
-                            category=p.get("category"),
-                            unit=p.get("unit"),
-                            confidence=float(p.get("confidence", 1.0)),
-                        )
-                    )
-                return ExtractedDocument(
-                    findings=entities,
-                    raw_json_draft=data,
-                )
-
-            # Извлечение административной шапки
+            # Валидация административной шапки из ответа модели
             admin_info = self._parse_administrative(data, patient_id=patient_id)
 
-            # Извлечение заключения
+            # Извлечение заключения из ответа модели
             raw_conclusion = data.get("conclusion", [])
             conclusion_list: List[str] = []
             if isinstance(raw_conclusion, list):
                 conclusion_list = [str(c).strip() for c in raw_conclusion if str(c).strip()]
-            elif isinstance(raw_conclusion, str):
-                conclusion_list = [c.strip() for c in re.split(r"[,;\n]+", raw_conclusion) if c.strip()]
+            elif isinstance(raw_conclusion, str) and raw_conclusion.strip():
+                conclusion_list = [raw_conclusion.strip()]
 
-            # Разворачивание клинического дерева
+            # Разворачивание клинического дерева органов и систем
             findings = self._flatten_clinical_tree(data, raw_text=text)
 
             logger.info(
-                f"Успешно извлечено: {len(findings)} клинических признаков, "
+                f"Успешно извлечено через LLM: {len(findings)} клинических признаков, "
                 f"{len(conclusion_list)} заключений (пациент {patient_id})."
             )
 
