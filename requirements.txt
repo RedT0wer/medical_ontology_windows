@@ -77,5 +77,3 @@ urllib3==2.8.0
 uvicorn==0.54.0
 yarl==1.25.1
 zipp==4.1.2
-neo4j>=5.0
-sentence-transformers>=2.2
