@@ -145,24 +145,69 @@ def normalize_value_types(
 class MatchingEngine:
     """Интеллектуальный механизм сопоставления параметров с деревом онтологии."""
 
+    GENERIC_KEYS = {
+        "size",
+        "wall",
+        "wall_thickness",
+        "structure",
+        "form",
+        "pathology",
+        "pain",
+        "palpation",
+        "head",
+        "body",
+        "tail",
+        "lesions",
+        "findings",
+        "state",
+        "status",
+        "type",
+        "function",
+        "symptoms",
+        "examination",
+        "diameter",
+        "length",
+        "width",
+        "volume",
+        "condition",
+        "presence",
+        "right_lobe",
+        "left_lobe",
+        "parenchyma",
+        "vascular_tissue",
+        "bile_ducts",
+        "calyx",
+        "pelvis",
+        "contour",
+        "echogenicity",
+        "capsule",
+    }
+
     ARBITRATOR_SYSTEM_PROMPT = (
         "Ты — ведущий медицинский эксперт-онтолог. Твоя задача — сопоставить извлеченный из протокола параметр "
         "с существующим деревом онтологии признаков.\n"
         "Тебе дан исходный термин, предложенный путь, значение, контекст и список ближайших узлов онтологии.\n\n"
         "ПРАВИЛА АРБИТРАЖА:\n"
-        "1. MATCH / SYNONYM: если признак полностью соответствует существующему узлу "
-        "(например: 'толщина стенки ЖП' соответствует узлу 'liver.gallbladder.wall').\n"
+        "1. MATCH: если признак по клиническому смыслу точно соответствует существующему узлу "
+        "(например: 'ЧСС' соответствует 'vitals.pulse', или 'толщина стенки ЖП' соответствует 'liver.gallbladder.wall').\n"
         "   Укажи action='MATCH', 'matched_feature_id' (ID узла) и 'full_path'.\n"
-        "2. NEW_FEATURE: если признак является новым измерением или структурой органа "
-        "(например: 'полип' в желчном пузыре -> 'liver.gallbladder.polyp_size').\n"
-        "   Укажи action='NEW_FEATURE', 'parent_path' (например: 'liver.gallbladder'), 'key_name' ('polyp_size') и 'data_type'.\n"
-        "3. NEW_BRANCH: если описан принципиально новый орган или общая характеристика.\n\n"
+        "2. NEW_FEATURE: если признак является другим самостоятельным показателем или новой структурой "
+        "(например: 'артериальное давление' НЕ является пульсом -> 'vitals.blood_pressure', или 'полип' -> 'liver.gallbladder.polyp').\n"
+        "   Укажи action='NEW_FEATURE', 'full_path' (например: 'vitals.blood_pressure') и 'data_type'.\n"
+        "3. NEW_BRANCH: если описан принципиально новый орган или функциональная система.\n\n"
         "Отвечай СТРОГО в формате JSON без markdown:\n"
         "{\n"
         '  "action": "MATCH",\n'
         '  "matched_feature_id": 14,\n'
         '  "full_path": "liver.gallbladder.wall",\n'
         '  "reason": "Толщина стенки желчного пузыря является синонимом wall"\n'
+        "}\n"
+        "ИЛИ:\n"
+        "{\n"
+        '  "action": "NEW_FEATURE",\n'
+        '  "full_path": "vitals.blood_pressure",\n'
+        '  "data_type": "string",\n'
+        '  "reason": "Артериальное давление является отдельным показателем, отличным от пульса"\n'
         "}"
     )
 
@@ -461,16 +506,20 @@ class MatchingEngine:
             f"Определи: MATCH (это синоним одного из кандидатов) или NEW_FEATURE (новый параметр схемы)."
         )
 
+        llm_decision: Optional[Dict[str, Any]] = None
         try:
             raw_resp = self._call_llm(self.ARBITRATOR_SYSTEM_PROMPT, prompt)
-            data = json.loads(raw_resp)
-            action = data.get("action", "MATCH").upper()
-            matched_id = data.get("matched_feature_id")
+            llm_decision = json.loads(raw_resp)
+        except Exception as e:
+            logger.warning(f"Ошибка вызова или парсинга LLM-арбитража: {e}")
 
-            if action == "MATCH" and matched_id:
+        if llm_decision and isinstance(llm_decision, dict):
+            action = str(llm_decision.get("action", "")).upper()
+            matched_id = llm_decision.get("matched_feature_id")
+
+            if action in ("MATCH", "SYNONYM") and matched_id:
                 node = self.session.get(FeatureNode, int(matched_id))
                 if node:
-                    # Регистрируем новый синоним
                     self._ensure_alias(node.id, raw_key)
                     return MatchDecision(
                         action="MATCH",
@@ -479,18 +528,36 @@ class MatchingEngine:
                         data_type=node.data_type,
                         unit=node.unit,
                         similarity=candidates[0].similarity if candidates else 0.85,
-                        reason=f"LLM-арбитраж: {data.get('reason', 'Признан синонимом')}",
+                        reason=f"LLM-арбитраж: {llm_decision.get('reason', 'Признан синонимом')}",
                         candidates=candidates,
                     )
-        except Exception as e:
-            logger.warning(f"Ошибка LLM-арбитража: {e}")
+            elif action in ("NEW", "NEW_FEATURE", "NEW_BRANCH"):
+                target_new_path = llm_decision.get("full_path")
+                if not target_new_path and llm_decision.get("parent_path") and llm_decision.get("key_name"):
+                    target_new_path = f"{llm_decision['parent_path']}.{llm_decision['key_name']}"
+                if not target_new_path:
+                    target_new_path = path_hint
 
-        # Fallback при невозможности арбитража
-        if candidates and candidates[0].similarity >= 0.80:
+                target_data_type = llm_decision.get("data_type") or "string"
+                new_node = self.ensure_feature_path(target_new_path, data_type=target_data_type, status="candidate")
+                if raw_key.lower().strip() != new_node.key_name.lower().strip():
+                    self._ensure_alias(new_node.id, raw_key)
+                return MatchDecision(
+                    action="NEW_FEATURE",
+                    feature_id=new_node.id,
+                    full_path=new_node.full_path,
+                    data_type=new_node.data_type,
+                    unit=new_node.unit,
+                    similarity=candidates[0].similarity if candidates else 0.0,
+                    reason=f"LLM-арбитраж: {llm_decision.get('reason', 'Зарегистрирован как новый признак схемы')}",
+                    candidates=candidates,
+                )
+
+        # Fallback при невозможности арбитража (LLM не ответила или вернула некорректный ответ)
+        if candidates and candidates[0].similarity >= settings.SIMILARITY_THRESHOLD_HIGH:
             c = candidates[0]
             node = self.session.get(FeatureNode, c.feature_id)
             if node:
-                self._ensure_alias(node.id, raw_key)
                 return MatchDecision(
                     action="MATCH",
                     feature_id=node.id,
@@ -504,7 +571,6 @@ class MatchingEngine:
 
         # Создаем новый узел по предложенному пути
         new_node = self.ensure_feature_path(path_hint, status="candidate")
-        self._ensure_alias(new_node.id, raw_key)
         return MatchDecision(
             action="NEW_FEATURE",
             feature_id=new_node.id,
@@ -512,20 +578,21 @@ class MatchingEngine:
             data_type=new_node.data_type,
             unit=new_node.unit,
             similarity=candidates[0].similarity if candidates else 0.0,
-            reason="Арбитраж: зарегистрирован как новый признак схемы",
+            reason="Арбитраж (fallback): зарегистрирован как новый признак схемы",
             candidates=candidates,
         )
 
     def _ensure_alias(self, feature_id: int, alias_text: str) -> None:
         """Добавление формулировки в feature_aliases при отсутствии."""
-        clean = alias_text.strip()
-        if not clean or len(clean) < 2:
+        clean = alias_text.strip().lower()
+        if not clean or len(clean) < 3 or clean in self.GENERIC_KEYS:
             return
 
         exists = (
             self.session.query(FeatureAlias)
+            .join(FeatureNode, FeatureNode.id == FeatureAlias.feature_id)
             .filter(
-                FeatureAlias.feature_id == feature_id,
+                FeatureNode.profile_id == self.profile.id,
                 FeatureAlias.alias_text.ilike(clean),
             )
             .first()
@@ -561,7 +628,8 @@ class MatchingEngine:
         )
         if exact_node:
             num_val, text_val, json_val = normalize_value_types(raw_value, exact_node.data_type)
-            self._ensure_alias(exact_node.id, raw_key)
+            if raw_key.lower().strip() != exact_node.key_name.lower().strip():
+                self._ensure_alias(exact_node.id, raw_key)
             return MatchDecision(
                 action="MATCH",
                 feature_id=exact_node.id,
@@ -587,7 +655,8 @@ class MatchingEngine:
                 node = self.session.get(FeatureNode, best.feature_id)
                 if node:
                     num_val, text_val, json_val = normalize_value_types(raw_value, node.data_type)
-                    self._ensure_alias(node.id, raw_key)
+                    if raw_key.lower().strip() != node.key_name.lower().strip():
+                        self._ensure_alias(node.id, raw_key)
                     return MatchDecision(
                         action="MATCH",
                         feature_id=node.id,
@@ -626,7 +695,8 @@ class MatchingEngine:
             display_name=raw_key.replace("_", " ").capitalize(),
             status="candidate",
         )
-        self._ensure_alias(new_node.id, raw_key)
+        if raw_key.lower().strip() != new_node.key_name.lower().strip():
+            self._ensure_alias(new_node.id, raw_key)
 
         num_val, text_val, json_val = normalize_value_types(raw_value, new_node.data_type)
         return MatchDecision(

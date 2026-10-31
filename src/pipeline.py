@@ -275,6 +275,7 @@ class QuestionnaireProcessor:
         compiled_findings: List[Tuple[str, str, Any]] = []
 
         # 2. Обработка и сохранение каждого извлеченного признака
+        doc_values_by_feature: Dict[int, DocumentValue] = {}
         for entity in extracted_doc.findings:
             decision: MatchDecision = matcher.match_parameter(
                 raw_key=entity.raw_key,
@@ -291,34 +292,49 @@ class QuestionnaireProcessor:
             else:
                 matched_count += 1
 
-            # Предотвращение дубликатов (document_id, feature_id)
-            existing_val = (
-                session.query(DocumentValue)
-                .filter(
-                    DocumentValue.document_id == document.id,
-                    DocumentValue.feature_id == decision.feature_id,
-                )
-                .first()
-            )
+            if decision.feature_id:
+                # Предотвращение дубликатов (document_id, feature_id) как в текущей сессии, так и в БД
+                existing_val = doc_values_by_feature.get(decision.feature_id)
+                if not existing_val:
+                    existing_val = (
+                        session.query(DocumentValue)
+                        .filter(
+                            DocumentValue.document_id == document.id,
+                            DocumentValue.feature_id == decision.feature_id,
+                        )
+                        .first()
+                    )
 
-            if not existing_val:
-                val_record = DocumentValue(
-                    document_id=document.id,
-                    feature_id=decision.feature_id,
-                    value_numeric=decision.value_numeric,
-                    value_text=decision.value_text,
-                    value_json=decision.value_json,
-                    raw_context=entity.context,
-                    confidence=entity.confidence,
-                    meta_data={
-                        "raw_key": entity.raw_key,
-                        "path_hint": entity.path_hint,
-                        "action": decision.action,
-                        "reason": decision.reason,
-                        "similarity": round(decision.similarity, 4),
-                    },
-                )
-                session.add(val_record)
+                if not existing_val:
+                    val_record = DocumentValue(
+                        document_id=document.id,
+                        feature_id=decision.feature_id,
+                        value_numeric=decision.value_numeric,
+                        value_text=decision.value_text,
+                        value_json=decision.value_json,
+                        raw_context=entity.context,
+                        confidence=entity.confidence,
+                        meta_data={
+                            "raw_key": entity.raw_key,
+                            "path_hint": entity.path_hint,
+                            "action": decision.action,
+                            "reason": decision.reason,
+                            "similarity": round(decision.similarity, 4),
+                        },
+                    )
+                    session.add(val_record)
+                    session.flush()
+                    doc_values_by_feature[decision.feature_id] = val_record
+                else:
+                    # Если у существующей записи нет значения, а у новой появилось — дополняем
+                    if existing_val.value_numeric is None and decision.value_numeric is not None:
+                        existing_val.value_numeric = decision.value_numeric
+                    if existing_val.value_text is None and decision.value_text is not None:
+                        existing_val.value_text = decision.value_text
+                    if existing_val.value_json is None and decision.value_json is not None:
+                        existing_val.value_json = decision.value_json
+                    if entity.context and entity.context not in (existing_val.raw_context or ""):
+                        existing_val.raw_context = (f"{existing_val.raw_context or ''}; {entity.context}").strip("; ")
 
             val_for_json = (
                 decision.value_numeric
@@ -348,17 +364,31 @@ class QuestionnaireProcessor:
                 display_name="Клиническое заключение",
                 status="approved",
             )
-            conclusion_val = DocumentValue(
-                document_id=document.id,
-                feature_id=conclusion_node.id,
-                value_numeric=None,
-                value_text=None,
-                value_json=extracted_doc.conclusion,
-                raw_context="; ".join(extracted_doc.conclusion),
-                confidence=1.0,
-                meta_data={"action": "MATCH", "reason": "Клинические диагнозы и синдромы протокола"},
+            existing_conclusion = doc_values_by_feature.get(conclusion_node.id) or (
+                session.query(DocumentValue)
+                .filter(
+                    DocumentValue.document_id == document.id,
+                    DocumentValue.feature_id == conclusion_node.id,
+                )
+                .first()
             )
-            session.add(conclusion_val)
+            if not existing_conclusion:
+                conclusion_val = DocumentValue(
+                    document_id=document.id,
+                    feature_id=conclusion_node.id,
+                    value_numeric=None,
+                    value_text=None,
+                    value_json=extracted_doc.conclusion,
+                    raw_context="; ".join(extracted_doc.conclusion),
+                    confidence=1.0,
+                    meta_data={"action": "MATCH", "reason": "Клинические диагнозы и синдромы протокола"},
+                )
+                session.add(conclusion_val)
+                session.flush()
+                doc_values_by_feature[conclusion_node.id] = conclusion_val
+            else:
+                existing_conclusion.value_json = extracted_doc.conclusion
+                existing_conclusion.raw_context = "; ".join(extracted_doc.conclusion)
 
         # 4. Компиляция итогового валидного JSON по эталону
         compiled_json = build_compiled_json(
