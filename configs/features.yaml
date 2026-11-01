@@ -1,0 +1,18 @@
+# Конфигурация признаков для выгрузки датасета
+features:
+  - vitals.temperature
+  - vitals.heart_rate
+  - vitals.blood_pressure
+  - respiratory_system.chest
+  - respiratory_system.percussion
+  - cardiovascular_system.heart_and_large_vessels
+  - cardiovascular_system.percussion
+  - cardiovascular_system.condition
+  - digestive_system.tongue
+  - digestive_system.abdomen
+  - digestive_system.per_rectum
+  - urinary_system.kidneys
+  - ecg
+  - conclusion
+  - administrative_block.diagnosis
+  - liver.size.ap_lobe_right
