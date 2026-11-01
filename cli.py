@@ -20,6 +20,7 @@ import sys
 from typing import Any, Dict, List, Optional
 from src.config import logger, settings
 from src.db import get_db_session, init_db
+from src.export import export_dataset, load_feature_config
 from src.matcher import MatchingEngine
 from src.models import (
     Document,
@@ -339,84 +340,37 @@ def cmd_ontology(args) -> None:
             print(f"  {prefix} {f['full_path']:<40} (тип: {f['data_type']}{unit_info}{recs_info})")
 
 
-def cmd_export_csv(args) -> None:
-    """Сборка и выгрузка датасета признаков в CSV с автоматическим заполнением NaN для пропущенных полей."""
+def cmd_export(args) -> None:
+    """Сборка и выгрузка датасета признаков в CSV / Parquet по конфигурационному файлу с NaN для пропущенных полей."""
     configure_cli_logging(args.json)
-    out_file = Path(args.output)
+    config_file = getattr(args, "config", None)
+    if not config_file and Path("configs/features.yaml").exists():
+        config_file = "configs/features.yaml"
 
-    with get_db_session() as session:
-        profile = session.query(DocumentProfile).filter(DocumentProfile.code == "us_abdomen").first()
-        if not profile:
-            sys.stderr.write("Профиль документов не найден в базе данных.\n")
-            sys.exit(1)
-
-        # 1. Определение списка запрашиваемых признаков
-        target_paths: List[str] = []
-        if args.features:
-            target_paths = [f.strip() for f in args.features.split(",") if f.strip()]
-        else:
-            # Все листовые признаки профиля
-            leaf_nodes = (
-                session.query(FeatureNode)
-                .filter(FeatureNode.profile_id == profile.id, FeatureNode.is_leaf == True)
-                .order_by(FeatureNode.full_path)
-                .all()
-            )
-            target_paths = [n.full_path for n in leaf_nodes if n.full_path != "conclusion"]
-
-        if not target_paths:
-            sys.stderr.write("В онтологии нет зарегистрированных признаков для экспорта.\n")
-            sys.exit(1)
-
-        # 2. Получение всех документов профиля
-        documents = (
-            session.query(Document)
-            .filter(Document.profile_id == profile.id)
-            .order_by(Document.id)
-            .all()
+    try:
+        features_list = [f.strip() for f in args.features.split(",") if f.strip()] if getattr(args, "features", None) else None
+        result = export_dataset(
+            config_path=config_file,
+            output_path=getattr(args, "output", None),
+            output_format=getattr(args, "format", None),
+            features=features_list,
+            profile_code=getattr(args, "profile", None),
         )
 
-        if not documents:
-            sys.stderr.write("В базе нет обработанных документов для выгрузки.\n")
-            sys.exit(1)
-
-        # 3. Сбор разреженной матрицы
-        fieldnames = ["document_id", "patient_id", "consultation_date"] + target_paths
-        rows: List[Dict[str, Any]] = []
-
-        for doc in documents:
-            row: Dict[str, Any] = {
-                "document_id": doc.id,
-                "patient_id": doc.patient_id,
-                "consultation_date": doc.consultation_date.isoformat() if doc.consultation_date else "NaN",
-            }
-            # Сопоставляем значения документа
-            val_map = {
-                v.feature.full_path: (
-                    v.value_numeric if v.value_numeric is not None else (v.value_text or "NaN")
-                )
-                for v in doc.values
-                if v.feature
-            }
-            for path in target_paths:
-                row[path] = val_map.get(path, "NaN")
-
-            rows.append(row)
-
-        # 4. Запись в CSV
-        out_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_file, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, restval="NaN")
-            writer.writeheader()
-            writer.writerows(rows)
-
         if args.json:
-            print(json.dumps({"status": "ok", "total_documents": len(rows), "total_features": len(target_paths), "file": str(out_file)}, ensure_ascii=False, indent=2))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
-            print(f"Датасет успешно собран и экспортирован в '{out_file}':")
-            print(f"  Всего пациентов/документов: {len(rows)}")
-            print(f"  Колонок признаков: {len(target_paths)}")
-            print(f"  Отсутствующие значения заполнены как NaN.")
+            print(f"Датасет успешно собран и экспортирован:")
+            print(f"  Файл: {result['file']}")
+            print(f"  Формат: {result['format']}")
+            print(f"  Всего анкет/пациентов: {result['total_documents']}")
+            print(f"  Признаков: {result['total_features']}")
+            print(f"  Колонок в файле: {len(result['columns'])}")
+            print(f"  Размер: {result['file_size_bytes']} байт")
+            print(f"  Отсутствующие признаки заполнены как NaN.")
+    except Exception as e:
+        sys.stderr.write(f"Ошибка при экспорте датасета: {e}\n")
+        sys.exit(1)
 
 
 def cmd_init_db(args) -> None:
@@ -525,12 +479,36 @@ def main():
     p_onto.add_argument("--json", action="store_true", help="Вывод чистого JSON в stdout")
     p_onto.set_defaults(func=cmd_ontology)
 
-    # 3. Команда: export-csv (выгрузка датасета)
-    p_exp = subparsers.add_parser("export-csv", parents=[parent_parser], help="Экспорт датасета признаков в CSV с NaN")
-    p_exp.add_argument("--output", "-o", type=str, default="dataset.csv", help="Путь к результирующему CSV-файлу")
-    p_exp.add_argument("--features", type=str, default="", help="Список признаков через запятую (по умолчанию: все)")
-    p_exp.add_argument("--json", action="store_true", help="Вывод статуса в формате JSON")
-    p_exp.set_defaults(func=cmd_export_csv)
+    # 3. Команда: export
+    p_exp = subparsers.add_parser(
+        "export",
+        parents=[parent_parser],
+        help="Экспорт датасета признаков в CSV / Parquet по YAML-конфигурации",
+    )
+    p_exp.add_argument(
+        "--config",
+        "-c",
+        dest="config",
+        type=str,
+        default=None,
+        help="Путь к YAML-файлу конфигурации признаков",
+    )
+    p_exp.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Путь к результирующему файлу (.csv или .parquet)",
+    )
+    p_exp.add_argument(
+        "--format",
+        "-f",
+        type=str,
+        choices=["csv", "parquet"],
+        default="csv",
+        help="Формат выгрузки (csv, parquet или auto по расширению файла)",
+    )
+    p_exp.set_defaults(func=cmd_export)
 
     # 4. Команда: search (поиск по вектору)
     p_search = subparsers.add_parser("search", parents=[parent_parser], help="Семантический поиск признака в схеме")
