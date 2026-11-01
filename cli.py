@@ -342,22 +342,20 @@ def cmd_ontology(args) -> None:
 
 def cmd_export(args) -> None:
     """Сборка и выгрузка датасета признаков в CSV / Parquet по конфигурационному файлу с NaN для пропущенных полей."""
-    configure_cli_logging(args.json)
-    config_file = getattr(args, "config", None)
+    is_json = getattr(args, "json", False) or "--json" in sys.argv
+    configure_cli_logging(is_json)
+    config_file = getattr(args, "config", None) or getattr(args, "config_pos", None)
     if not config_file and Path("configs/features.yaml").exists():
         config_file = "configs/features.yaml"
 
     try:
-        features_list = [f.strip() for f in args.features.split(",") if f.strip()] if getattr(args, "features", None) else None
         result = export_dataset(
-            config_path=config_file,
-            output_path=getattr(args, "output", None),
-            output_format=getattr(args, "format", None),
-            features=features_list,
-            profile_code=getattr(args, "profile", None),
+            config=config_file,
+            output=getattr(args, "output", None),
+            format=getattr(args, "format", None),
         )
 
-        if args.json:
+        if is_json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(f"Датасет успешно собран и экспортирован:")
@@ -486,6 +484,13 @@ def main():
         help="Экспорт датасета признаков в CSV / Parquet по YAML-конфигурации",
     )
     p_exp.add_argument(
+        "config_pos",
+        nargs="?",
+        default=None,
+        metavar="CONFIG",
+        help="Путь к YAML-файлу конфигурации признаков (например, configs/features.yaml)",
+    )
+    p_exp.add_argument(
         "--config",
         "-c",
         dest="config",
@@ -505,8 +510,8 @@ def main():
         "-f",
         type=str,
         choices=["csv", "parquet"],
-        default="csv",
-        help="Формат выгрузки (csv, parquet или auto по расширению файла)",
+        default=None,
+        help="Формат выгрузки (csv или parquet)",
     )
     p_exp.set_defaults(func=cmd_export)
 
