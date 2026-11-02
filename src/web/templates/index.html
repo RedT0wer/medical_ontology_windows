@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Медицинская Онтология | Веб-интерфейс</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🩺</text></svg>">
+</head>
+<body>
+
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="app-sidebar">
+      <div class="sidebar-header">
+        <div class="brand-icon">🩺</div>
+        <div>
+          <div class="brand-title">МедОнтология</div>
+          <div class="brand-sub">Клинические протоколы</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-tab="questionnaires">
+          <span class="nav-icon">📋</span>
+          <span>Анкеты пациентов</span>
+        </div>
+        <div class="nav-item" data-tab="graph">
+          <span class="nav-icon">🕸️</span>
+          <span>Онтология признаков</span>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="db-status-pill" title="Подключено к PostgreSQL и pgvector">
+          <span class="status-dot"></span>
+          <span>PostgreSQL Online</span>
+        </div>
+        <span style="font-size: 11px;">v1.0</span>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+
+      <!-- ================================================================== -->
+      <!-- Tab 1: Questionnaires & JSON Viewer                                -->
+      <!-- ================================================================== -->
+      <section class="view-panel active" id="view-questionnaires">
+        <div class="questionnaires-layout">
+          <!-- Left: List of Questionnaires -->
+          <div class="q-list-pane">
+            <div class="q-list-header">
+              <div class="pane-title-row">
+                <span class="pane-title">Анкеты</span>
+                <span class="badge-counter" id="qTotalCount">0</span>
+              </div>
+              <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="qSearchInput" placeholder="Поиск по ID, пациенту, врачу..." autocomplete="off">
+              </div>
+            </div>
+
+            <div class="q-list-scroll" id="qListContainer">
+              <!-- Rendered via app.js -->
+            </div>
+          </div>
+
+          <!-- Right: Selected Questionnaire Detail & JSON View -->
+          <div class="q-detail-pane" id="qDetailContainer">
+            <div class="empty-placeholder">
+              <span class="empty-icon">👈</span>
+              <span>Выберите анкету из списка слева для просмотра ее JSON и клинических данных</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- Tab 2: Feature Ontology Graph (Vis.js)                             -->
+      <!-- ================================================================== -->
+      <section class="view-panel" id="view-graph">
+        <div class="graph-container-wrap">
+          <!-- Top Controls & Statistics Bar -->
+          <div class="graph-top-bar">
+            <div class="graph-stats">
+              <div class="stat-chip">
+                <span>Узлов схемы:</span>
+                <strong id="statTotalNodes">0</strong>
+              </div>
+              <div class="stat-chip">
+                <span>Листовых признаков:</span>
+                <strong id="statLeafNodes">0</strong>
+              </div>
+              <div class="stat-chip">
+                <span>Всего анкет:</span>
+                <strong id="statDocsCount">0</strong>
+              </div>
+            </div>
+
+            <div class="graph-controls">
+              <input type="text" id="graphSearchInput" class="graph-search-input" placeholder="🔍 Найти признак в графе..." autocomplete="off">
+
+              <select id="graphLayoutSelect" class="select-ctrl" title="Сменить способ раскладки графа">
+                <option value="hierarchical-ud">🌳 Иерархия (Сверху-Вниз)</option>
+                <option value="hierarchical-lr">🌲 Иерархия (Слева-Направо)</option>
+                <option value="physics">⚛️ Физический граф (Force)</option>
+              </select>
+
+              <button id="btnFitGraph" class="btn btn-default btn-sm" title="Показать весь граф целиком">
+                🎯 Сбросить масштаб
+              </button>
+            </div>
+          </div>
+
+          <!-- Interactive Graph Canvas Area -->
+          <div class="graph-canvas-area" id="graphCanvas">
+            <!-- Rendered via Vis.js in app.js -->
+          </div>
+
+          <!-- Helper Hint -->
+          <div class="graph-hint">
+            💡 <b>Подсказка:</b> Кликните по любому узлу, чтобы открыть мини-таблицу его значений у всех анкет.
+          </div>
+
+          <!-- Color Legend -->
+          <div class="graph-legend">
+            <div style="font-weight: 700; margin-bottom: 2px;">Обозначения:</div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background-color: #4f46e5;"></div>
+              <span>Корневой профиль</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background-color: #0284c7;"></div>
+              <span>Ветка / Группа (орган/система)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background-color: #10b981;"></div>
+              <span>Числовой признак (число/дробь)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background-color: #f59e0b;"></div>
+              <span>Строковый признак (текст)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background-color: #8b5cf6;"></div>
+              <span>Массив / Комплексный объект</span>
+            </div>
+          </div>
+
+          <!-- Slide-Over Inspector: Feature Values Across All Questionnaires -->
+          <aside class="inspector-drawer" id="nodeInspectorDrawer">
+            <div class="drawer-header">
+              <div class="drawer-title-group">
+                <h3 id="drawerTitle">Параметр онтологии</h3>
+                <div class="drawer-path-sub" id="drawerPath">path.to.feature</div>
+              </div>
+              <button class="drawer-close-btn" onclick="closeNodeInspector()" title="Закрыть панель">✕</button>
+            </div>
+
+            <div class="drawer-body" id="drawerBody">
+              <!-- Rendered via renderNodeInspector() in app.js -->
+            </div>
+          </aside>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Toast notification -->
+  <div class="toast-msg" id="toastMsg">Сообщение</div>
+
+  <!-- Vendored Vis.js graph library & Application script -->
+  <script src="/static/js/vis-network.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -383,6 +383,13 @@ def cmd_init_db(args) -> None:
         print("База данных успешно инициализирована со всеми индексами и базовым профилем.")
 
 
+def cmd_web(args) -> None:
+    """Запуск веб-интерфейса для просмотра анкет и онтологии признаков."""
+    from src.web.app import run_server
+
+    run_server(host=args.host, port=args.port, reload=args.reload)
+
+
 def main():
     if "--json" in sys.argv:
         configure_cli_logging(True)
@@ -535,6 +542,13 @@ def main():
     p_init.add_argument("--drop-all", action="store_true", help="Удалить существующие таблицы перед созданием")
     p_init.add_argument("--json", action="store_true", help="Вывод статуса в формате JSON")
     p_init.set_defaults(func=cmd_init_db)
+
+    # 7. Команда: web (запуск веб-интерфейса)
+    p_web = subparsers.add_parser("web", parents=[parent_parser], help="Запуск простого веб-интерфейса онтологии и анкет")
+    p_web.add_argument("--host", type=str, default="127.0.0.1", help="Хост веб-сервера (по умолчанию: 127.0.0.1)")
+    p_web.add_argument("--port", type=int, default=8000, help="Порт веб-сервера (по умолчанию: 8000)")
+    p_web.add_argument("--reload", action="store_true", help="Автоматический перезапуск при изменении кода")
+    p_web.set_defaults(func=cmd_web)
 
     args = parser.parse_args()
 
