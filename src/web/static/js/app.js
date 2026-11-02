@@ -8,6 +8,7 @@ const state = {
   questionnaires: [],
   selectedDocId: null,
   currentDocData: null,
+  docViewMode: "both", // "both", "json", "raw"
   graphData: null,
   network: null,
   selectedNodeId: null,
@@ -178,16 +179,34 @@ async function selectQuestionnaire(docId) {
   }
 }
 
+function setDocViewMode(mode) {
+  state.docViewMode = mode;
+  if (state.currentDocData) {
+    renderQuestionnaireDetail(state.currentDocData);
+  }
+}
+
+function copyRawText() {
+  if (!state.currentDocData || !state.currentDocData.raw_text) return;
+  navigator.clipboard
+    .writeText(state.currentDocData.raw_text)
+    .then(() => showToast("✅ Исходный текст скопирован в буфер обмена!"))
+    .catch(() => showToast("❌ Не удалось скопировать"));
+}
+
 function renderQuestionnaireDetail(doc) {
   const detailPane = document.getElementById("qDetailContainer");
   const jsonContent = doc.json || {};
   const admin = doc.administrative || {};
+  const rawText = doc.raw_text || "";
 
   const dateStr = doc.consultation_date
     ? new Date(doc.consultation_date).toLocaleString("ru-RU")
     : "Не указана";
 
   const rawJsonString = JSON.stringify(jsonContent, null, 2);
+  const viewMode = state.docViewMode || "both";
+  const isSingle = viewMode !== "both";
 
   detailPane.innerHTML = `
     <!-- Top Header -->
@@ -205,33 +224,54 @@ function renderQuestionnaireDetail(doc) {
         </div>
       </div>
       <div class="header-actions">
-        <button class="btn btn-default" onclick="copyCurrentJson()">
-          📋 Копировать JSON
-        </button>
-        <a class="btn btn-default" href="/api/documents/${doc.id}/raw-json" download="questionnaire_${doc.id}.json" target="_blank">
+        <!-- View mode switcher tabs -->
+        <div class="view-mode-tabs">
+          <button class="view-mode-btn ${viewMode === 'both' ? 'active' : ''}" onclick="setDocViewMode('both')">📑 Оба блока</button>
+          <button class="view-mode-btn ${viewMode === 'json' ? 'active' : ''}" onclick="setDocViewMode('json')">{ } Только JSON</button>
+          <button class="view-mode-btn ${viewMode === 'raw' ? 'active' : ''}" onclick="setDocViewMode('raw')">📄 Исходный текст</button>
+        </div>
+
+        <a class="btn btn-default" href="/api/documents/${doc.id}/raw-json" download="questionnaire_${doc.id}.json" target="_blank" title="Скачать чистый файл .json">
           ⬇️ Скачать .json
         </a>
       </div>
     </div>
 
-    <!-- JSON Viewer Body -->
+    <!-- Viewer Body -->
     <div class="q-json-container">
-      <div class="json-card">
-        <div class="json-toolbar">
-          <span>Скомпилированный нормализованный JSON анкеты</span>
-          <span style="font-family: monospace;">Размер: ${rawJsonString.length} символов</span>
+      ${
+        viewMode === "both" || viewMode === "json"
+          ? `
+        <div class="json-card ${isSingle ? 'single-view' : ''}">
+          <div class="json-toolbar">
+            <span class="json-toolbar-title">{ } Скомпилированный нормализованный JSON</span>
+            <div class="json-toolbar-actions">
+              <span style="font-family: monospace; font-size: 11px;">${rawJsonString.length} симв.</span>
+              <button class="btn btn-default btn-sm" onclick="copyCurrentJson()">
+                📋 Копировать JSON
+              </button>
+            </div>
+          </div>
+          <pre class="json-view-pre" id="jsonPreCode">${syntaxHighlightJson(jsonContent)}</pre>
         </div>
-        <pre class="json-view-pre" id="jsonPreCode">${syntaxHighlightJson(jsonContent)}</pre>
-      </div>
+      `
+          : ""
+      }
 
       ${
-        doc.raw_text
+        (viewMode === "both" || viewMode === "raw") && rawText
           ? `
-        <div class="json-card" style="margin-top: 10px;">
+        <div class="json-card ${isSingle ? 'single-view' : ''}">
           <div class="json-toolbar">
-            <span>Исходный текст протокола осмотра</span>
+            <span class="json-toolbar-title">📄 Исходный клинический протокол (из базы данных)</span>
+            <div class="json-toolbar-actions">
+              <span style="font-family: monospace; font-size: 11px;">${rawText.length} симв.</span>
+              <button class="btn btn-default btn-sm" onclick="copyRawText()">
+                📋 Копировать текст
+              </button>
+            </div>
           </div>
-          <pre class="json-view-pre" style="color: #475569; font-size: 12px;">${escapeHtml(doc.raw_text)}</pre>
+          <pre class="raw-text-pre">${escapeHtml(rawText)}</pre>
         </div>
       `
           : ""
