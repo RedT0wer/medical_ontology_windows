@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Медицинская Онтология | Веб-интерфейс</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.1">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🩺</text></svg>">
 </head>
 <body>
@@ -151,8 +151,22 @@
           <!-- Slide-Over Inspector: Feature Values Across All Questionnaires -->
           <aside class="inspector-drawer" id="nodeInspectorDrawer">
             <div class="drawer-header">
-              <div class="drawer-title-group">
-                <h3 id="drawerTitle">Параметр онтологии</h3>
+              <div class="drawer-title-group" style="flex: 1; min-width: 0;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  <h3 id="drawerTitle" style="margin: 0; word-break: break-word;">Параметр онтологии</h3>
+                  <button type="button" class="btn-rename-trigger" id="btnEditNodeName" onclick="startRenamingNode()" title="Переименовать узел онтологии">
+                    ✎ Переименовать
+                  </button>
+                </div>
+                <!-- Форма переименования -->
+                <div id="renameNodeForm" class="rename-node-box" style="display: none; margin-top: 10px;">
+                  <div style="font-size: 11px; color: #64748b; margin-bottom: 4px; font-weight: 500;">Пользовательское наименование:</div>
+                  <input type="text" id="renameNodeInput" class="rename-input" placeholder="Введите название признака...">
+                  <div style="display: flex; gap: 6px; margin-top: 8px;">
+                    <button type="button" class="btn-save-rename" onclick="saveNodeRename()">Сохранить</button>
+                    <button type="button" class="btn-cancel-rename" onclick="cancelNodeRename()">Отмена</button>
+                  </div>
+                </div>
                 <div class="drawer-path-sub" id="drawerPath">path.to.feature</div>
               </div>
               <button class="drawer-close-btn" onclick="closeNodeInspector()" title="Закрыть панель">✕</button>
@@ -173,6 +187,6 @@
 
   <!-- Vendored Vis.js graph library & Application script -->
   <script src="/static/js/vis-network.min.js"></script>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=2.1"></script>
 </body>
 </html>

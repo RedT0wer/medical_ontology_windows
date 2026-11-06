@@ -10,6 +10,7 @@
 """
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 import numpy as np
@@ -213,12 +214,119 @@ def clean_column_for_export(series: pd.Series, col_name: str = "") -> pd.Series:
         )
 
 
-def build_dataset_dataframe(session: Session, features: List[str]) -> pd.DataFrame:
-    """Формирует DataFrame со значениями указанных признаков для всех анкет в базе данных.
+def parse_flexible_date(date_val: Union[str, datetime]) -> datetime:
+    """Парсинг даты из строки или datetime с поддержкой различных форматов."""
+    if isinstance(date_val, datetime):
+        return date_val
+    clean = str(date_val).strip()
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%d.%m.%Y",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(clean, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(clean)
+    except Exception:
+        raise ValueError(f"Не удалось распознать формат даты: '{date_val}'")
 
+
+def build_dataset_dataframe(
+    session: Session,
+    features: List[str],
+    from_date: Optional[Union[str, datetime]] = None,
+    to_date: Optional[Union[str, datetime]] = None,
+    filter_diagnosis: Optional[str] = None,
+    filter_doctor: Optional[str] = None,
+    filter_institution: Optional[str] = None,
+) -> pd.DataFrame:
+    """Формирует DataFrame со значениями указанных признаков для анкет в базе данных,
+
+    с опциональной фильтрацией по дате, диагнозу, врачу и медицинскому учреждению.
     Если у анкеты нет признака — ставит NaN.
     """
     documents = session.query(Document).order_by(Document.id).all()
+
+    # Фильтрация по нижней границе даты консультации
+    if from_date is not None:
+        from_dt = parse_flexible_date(from_date)
+        documents = [d for d in documents if d.consultation_date and d.consultation_date >= from_dt]
+
+    # Фильтрация по верхней границе даты консультации
+    if to_date is not None:
+        to_dt = parse_flexible_date(to_date)
+        if to_dt.hour == 0 and to_dt.minute == 0 and to_dt.second == 0:
+            to_dt = to_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        documents = [d for d in documents if d.consultation_date and d.consultation_date <= to_dt]
+
+    # Фильтрация по диагнозу / клиническому заключению
+    if filter_diagnosis:
+        diag_term = filter_diagnosis.strip().lower()
+        matched_docs = []
+        for d in documents:
+            matched = False
+            if d.json_cache and isinstance(d.json_cache.compiled_json, dict):
+                conc = d.json_cache.compiled_json.get("conclusion")
+                if conc and diag_term in str(conc).lower():
+                    matched = True
+            if not matched:
+                for v in d.values:
+                    if v.feature and v.feature.full_path == "conclusion":
+                        if (v.value_text and diag_term in v.value_text.lower()) or (
+                            v.value_json and diag_term in str(v.value_json).lower()
+                        ):
+                            matched = True
+                            break
+            if not matched and d.raw_text and diag_term in d.raw_text.lower():
+                matched = True
+
+            if matched:
+                matched_docs.append(d)
+        documents = matched_docs
+
+    # Фильтрация по врачу
+    if filter_doctor:
+        doc_term = filter_doctor.strip().lower()
+        matched_docs = []
+        for d in documents:
+            matched = False
+            if d.administrative and isinstance(d.administrative, dict):
+                doctor_val = str(d.administrative.get("doctor") or "").lower()
+                if doc_term in doctor_val:
+                    matched = True
+            if not matched and d.json_cache and isinstance(d.json_cache.compiled_json, dict):
+                doctor_val = str(d.json_cache.compiled_json.get("doctor") or "").lower()
+                if doc_term in doctor_val:
+                    matched = True
+            if matched:
+                matched_docs.append(d)
+        documents = matched_docs
+
+    # Фильтрация по медицинскому учреждению
+    if filter_institution:
+        inst_term = filter_institution.strip().lower()
+        matched_docs = []
+        for d in documents:
+            matched = False
+            if d.administrative and isinstance(d.administrative, dict):
+                inst_val = str(d.administrative.get("institution") or "").lower()
+                if inst_term in inst_val:
+                    matched = True
+            if not matched and d.json_cache and isinstance(d.json_cache.compiled_json, dict):
+                inst_val = str(d.json_cache.compiled_json.get("institution") or "").lower()
+                if inst_term in inst_val:
+                    matched = True
+            if matched:
+                matched_docs.append(d)
+        documents = matched_docs
+
     columns = list(features)
 
     if not documents:
@@ -252,13 +360,25 @@ def export_dataset(
     config: Optional[Union[str, Path]] = None,
     output: Optional[Union[str, Path]] = None,
     format: Optional[str] = None,
+    from_date: Optional[Union[str, datetime]] = None,
+    to_date: Optional[Union[str, datetime]] = None,
+    filter_diagnosis: Optional[str] = None,
+    filter_doctor: Optional[str] = None,
+    filter_institution: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Сборка и выгрузка датасета указанных признаков для всех анкет в базе данных.
+    """Сборка и выгрузка датасета указанных признаков для всех анкет в базе данных
+
+    с возможностью гибкой фильтрации.
 
     Args:
         config: Путь к YAML-файлу конфигурации признаков (по умолчанию configs/features.yaml).
         output: Путь к файлу датасета (.csv или .parquet).
         format: Формат выгрузки ('csv' или 'parquet').
+        from_date: Нижняя граница даты консультации (включительно).
+        to_date: Верхняя граница даты консультации (включительно).
+        filter_diagnosis: Подстрока диагноза для фильтрации анкет.
+        filter_doctor: Подстрока ФИО врача.
+        filter_institution: Подстрока названия медучреждения.
 
     Returns:
         Словарь с отчетом об экспорте.
@@ -284,8 +404,26 @@ def export_dataset(
     else:
         final_format = "csv"
 
+    filters_applied = {
+        k: v for k, v in {
+            "from_date": str(from_date) if from_date else None,
+            "to_date": str(to_date) if to_date else None,
+            "filter_diagnosis": filter_diagnosis,
+            "filter_doctor": filter_doctor,
+            "filter_institution": filter_institution,
+        }.items() if v is not None
+    }
+
     with get_db_session() as session:
-        df = build_dataset_dataframe(session=session, features=target_features)
+        df = build_dataset_dataframe(
+            session=session,
+            features=target_features,
+            from_date=from_date,
+            to_date=to_date,
+            filter_diagnosis=filter_diagnosis,
+            filter_doctor=filter_doctor,
+            filter_institution=filter_institution,
+        )
 
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -304,6 +442,7 @@ def export_dataset(
             "total_features": len(target_features),
             "columns": list(df.columns),
             "file_size_bytes": file_size,
+            "filters": filters_applied,
         }
 
 
@@ -345,6 +484,36 @@ def main() -> None:
         default=None,
         help="Формат выгрузки (csv или parquet)",
     )
+    parser.add_argument(
+        "--from-date",
+        type=str,
+        default=None,
+        help="Фильтрация: начальная дата осмотра (ГГГГ-ММ-ДД)",
+    )
+    parser.add_argument(
+        "--to-date",
+        type=str,
+        default=None,
+        help="Фильтрация: конечная дата осмотра (ГГГГ-ММ-ДД)",
+    )
+    parser.add_argument(
+        "--filter-diagnosis",
+        type=str,
+        default=None,
+        help="Фильтрация: подстрока диагноза/заключения",
+    )
+    parser.add_argument(
+        "--filter-doctor",
+        type=str,
+        default=None,
+        help="Фильтрация: подстрока ФИО врача",
+    )
+    parser.add_argument(
+        "--filter-institution",
+        type=str,
+        default=None,
+        help="Фильтрация: подстрока медицинского учреждения",
+    )
 
     args = parser.parse_args()
     config_file = args.config or args.config_pos
@@ -354,6 +523,11 @@ def main() -> None:
             config=config_file,
             output=args.output,
             format=args.format,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            filter_diagnosis=args.filter_diagnosis,
+            filter_doctor=args.filter_doctor,
+            filter_institution=args.filter_institution,
         )
         print(f"Экспорт успешно завершен:")
         print(f"  Файл: {result['file']}")

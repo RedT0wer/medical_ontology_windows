@@ -26,6 +26,14 @@ document.addEventListener("DOMContentLoaded", () => {
   initGraphControls();
   loadQuestionnaires();
 
+  const editBtn = document.getElementById("btnEditNodeName");
+  if (editBtn) {
+    editBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      startRenamingNode();
+    });
+  }
+
   // Handle URL hash routing if present
   window.addEventListener("hashchange", handleHashRouting);
   handleHashRouting();
@@ -67,6 +75,7 @@ function initTabs() {
 }
 
 function switchTab(tabName) {
+  if (state.activeTab === tabName) return;
   state.activeTab = tabName;
 
   // Update sidebar active state
@@ -341,6 +350,7 @@ function getVisNetworkOptions(layoutType) {
   const direction = layoutType === "hierarchical-lr" ? "LR" : "UD";
 
   return {
+    autoResize: true,
     nodes: {
       shape: "dot",
       size: 20,
@@ -374,11 +384,9 @@ function getVisNetworkOptions(layoutType) {
       : {
           hierarchical: { enabled: false },
         },
+    // Для иерархического графа полностью отключаем физику, чтобы исключить любые скачки масштаба и смещения узлов
     physics: isHierarchical
-      ? {
-          hierarchicalRepulsion: { nodeDistance: 160 },
-          stabilization: { iterations: 150 },
-        }
+      ? false
       : {
           forceAtlas2Based: {
             gravitationalConstant: -70,
@@ -388,11 +396,11 @@ function getVisNetworkOptions(layoutType) {
             damping: 0.4,
           },
           solver: "forceAtlas2Based",
-          stabilization: { iterations: 200 },
+          stabilization: { enabled: true, iterations: 150, fit: false },
         },
     interaction: {
       hover: true,
-      tooltipDelay: 100,
+      tooltipDelay: 80,
       hideEdgesOnDrag: false,
       zoomView: true,
       dragView: true,
@@ -404,15 +412,61 @@ function renderVisNetwork(graphData) {
   const container = document.getElementById("graphCanvas");
   container.innerHTML = "";
 
-  const visNodes = new vis.DataSet(graphData.nodes);
-  const visEdges = new vis.DataSet(graphData.edges);
+  // Преобразуем подсказки каждого узла в DOM-элементы без сырого HTML-текста
+  graphData.nodes.forEach((n) => {
+    const tipEl = document.createElement("div");
+    tipEl.style.fontFamily = "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif";
+    tipEl.style.fontSize = "12px";
+    tipEl.style.lineHeight = "1.4";
+    tipEl.style.maxWidth = "280px";
 
-  const data = { nodes: visNodes, edges: visEdges };
+    const nameEl = document.createElement("div");
+    nameEl.style.fontWeight = "bold";
+    nameEl.style.fontSize = "13px";
+    nameEl.style.color = "#0f172a";
+    nameEl.style.marginBottom = "3px";
+    nameEl.textContent = n.display_name || n.key_name || n.label;
+    tipEl.appendChild(nameEl);
+
+    const pathEl = document.createElement("div");
+    pathEl.style.color = "#475569";
+    pathEl.style.fontSize = "11px";
+    pathEl.style.marginBottom = "2px";
+    pathEl.textContent = `Путь: ${n.full_path || ""}`;
+    tipEl.appendChild(pathEl);
+
+    const typeEl = document.createElement("div");
+    typeEl.style.color = "#475569";
+    typeEl.style.fontSize = "11px";
+    typeEl.style.marginBottom = "2px";
+    typeEl.textContent = `Тип: ${n.data_type || "—"}${n.unit ? " (" + n.unit + ")" : ""}`;
+    tipEl.appendChild(typeEl);
+
+    if (n.records_count !== undefined) {
+      const recsEl = document.createElement("div");
+      recsEl.style.color = "#2563eb";
+      recsEl.style.fontSize = "11px";
+      recsEl.textContent = `Заполнено: ${n.records_count} из ${n.total_documents || 0} анкет`;
+      tipEl.appendChild(recsEl);
+    }
+
+    n.title = tipEl;
+  });
+
+  state.visNodes = new vis.DataSet(graphData.nodes);
+  state.visEdges = new vis.DataSet(graphData.edges);
+
+  const data = { nodes: state.visNodes, edges: state.visEdges };
   const options = getVisNetworkOptions(state.graphLayout);
 
   state.network = new vis.Network(container, data, options);
 
-  // Click event: Opens inspector with mini table
+  // Однократно центрируем граф при первоначальной загрузке
+  state.network.once("afterDrawing", () => {
+    state.network.fit({ animation: false });
+  });
+
+  // Клик по узлу: открывает инспектор БЕЗ сброса масштаба и смещения холста
   state.network.on("click", (params) => {
     if (params.nodes && params.nodes.length > 0) {
       const selectedId = params.nodes[0];
@@ -424,10 +478,14 @@ function renderVisNetwork(graphData) {
     }
   });
 
-  // Double click event: Zoom in
+  // Двойной клик: центрирование узла с сохранением текущего масштаба
   state.network.on("doubleClick", (params) => {
     if (params.nodes && params.nodes.length > 0) {
-      state.network.focus(params.nodes[0], { scale: 1.4, animation: true });
+      const currentScale = state.network.getScale();
+      state.network.focus(params.nodes[0], {
+        scale: currentScale,
+        animation: { duration: 300, easingFunction: "easeInOutQuad" },
+      });
     }
   });
 }
@@ -445,7 +503,7 @@ function initGraphControls() {
     });
   }
 
-  // Graph Search
+  // Graph Search (плавный переход к узлу без скачка масштаба)
   const graphSearch = document.getElementById("graphSearchInput");
   if (graphSearch) {
     graphSearch.addEventListener("input", (e) => {
@@ -461,10 +519,25 @@ function initGraphControls() {
 
       if (match) {
         state.network.selectNodes([match.id]);
+        const currentScale = state.network.getScale();
         state.network.focus(match.id, {
-          scale: 1.3,
-          animation: { duration: 600, easingFunction: "easeInOutQuad" },
+          scale: currentScale,
+          animation: { duration: 400, easingFunction: "easeInOutQuad" },
         });
+      }
+    });
+  }
+
+  // Клавиатурные события для поля переименования узла
+  const renameInput = document.getElementById("renameNodeInput");
+  if (renameInput) {
+    renameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveNodeRename();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        cancelNodeRename();
       }
     });
   }
@@ -483,6 +556,7 @@ function initGraphControls() {
 // ============================================================================
 async function openNodeInspector(nodeId) {
   state.selectedNodeId = nodeId;
+  cancelNodeRename();
   const drawer = document.getElementById("nodeInspectorDrawer");
   drawer.classList.add("open");
 
@@ -500,7 +574,11 @@ async function openNodeInspector(nodeId) {
     const data = await res.json();
     state.currentNodeData = data;
     renderNodeInspector(data);
-    window.location.hash = `node-${nodeId}`;
+
+    // Обновляем URL без срабатывания hashchange для предотвращения скачков масштаба
+    if (window.location.hash !== `#node-${nodeId}`) {
+      history.replaceState(null, "", `#node-${nodeId}`);
+    }
   } catch (err) {
     console.error("Ошибка загрузки значений признака:", err);
     bodyEl.innerHTML = `<div class="empty-placeholder" style="color: #ef4444;"><span class="empty-icon">⚠️</span><span>Ошибка: ${err.message}</span></div>`;
@@ -512,7 +590,116 @@ function closeNodeInspector() {
   drawer.classList.remove("open");
   state.selectedNodeId = null;
   state.currentNodeData = null;
+  cancelNodeRename();
+  if (window.location.hash.startsWith("#node-")) {
+    history.replaceState(null, "", "#graph");
+  }
 }
+
+function startRenamingNode() {
+  const form = document.getElementById("renameNodeForm");
+  const input = document.getElementById("renameNodeInput");
+  if (!form || !input) return;
+
+  // Извлекаем текущее имя из доступных источников (не блокируя показ формы)
+  let currentName = "";
+  if (state.currentNodeData && state.currentNodeData.node) {
+    currentName = state.currentNodeData.node.display_name || state.currentNodeData.node.key_name || "";
+  } else if (state.graphData && state.graphData.nodes && state.selectedNodeId) {
+    const gNode = state.graphData.nodes.find((n) => n.id == state.selectedNodeId);
+    if (gNode) {
+      currentName = gNode.display_name || gNode.key_name || gNode.label || "";
+    }
+  }
+  if (!currentName) {
+    const titleEl = document.getElementById("drawerTitle");
+    if (titleEl) {
+      const text = titleEl.textContent.trim();
+      if (text !== "Загрузка данных признака..." && text !== "Параметр онтологии") {
+        currentName = text;
+      }
+    }
+  }
+
+  input.value = currentName;
+  form.style.display = "block";
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 30);
+}
+window.startRenamingNode = startRenamingNode;
+
+function cancelNodeRename() {
+  const form = document.getElementById("renameNodeForm");
+  if (form) form.style.display = "none";
+}
+window.cancelNodeRename = cancelNodeRename;
+
+async function saveNodeRename() {
+  const nodeId = state.selectedNodeId;
+  if (!nodeId) {
+    showToast("Сначала выберите узел для переименования");
+    return;
+  }
+
+  const input = document.getElementById("renameNodeInput");
+  if (!input) return;
+  const newName = input.value.trim();
+  if (!newName) {
+    showToast("Название не может быть пустым");
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/ontology/nodes/${nodeId}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: newName }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+
+    // 1. Обновляем локальное состояние и заголовок инспектора
+    if (state.currentNodeData && state.currentNodeData.node) {
+      state.currentNodeData.node.display_name = newName;
+    }
+    const titleEl = document.getElementById("drawerTitle");
+    if (titleEl) titleEl.textContent = newName;
+
+    cancelNodeRename();
+
+    // 2. Обновляем узел в датасете Vis.js
+    if (state.visNodes) {
+      const existing = state.visNodes.get(nodeId);
+      if (existing) {
+        state.visNodes.update({
+          id: nodeId,
+          label: newName,
+          display_name: newName,
+        });
+      }
+    }
+
+    // 3. Обновляем в кэше графа
+    if (state.graphData && state.graphData.nodes) {
+      const gNode = state.graphData.nodes.find((n) => n.id == nodeId);
+      if (gNode) {
+        gNode.display_name = newName;
+        gNode.label = newName;
+      }
+    }
+
+    showToast(`Узел переименован: "${newName}"`);
+  } catch (err) {
+    console.error("Ошибка переименования узла:", err);
+    showToast(`Ошибка: ${err.message}`);
+  }
+}
+window.saveNodeRename = saveNodeRename;
 
 function renderNodeInspector(data) {
   const node = data.node;
@@ -545,6 +732,13 @@ function renderNodeInspector(data) {
       <div>
         <div class="meta-field-label">Статус узла:</div>
         <div class="meta-field-val"><span style="color: #10b981;">✓ ${node.status || "approved"}</span></div>
+      </div>
+      <div style="grid-column: span 2;">
+        <div class="meta-field-label">Отображаемое имя узла:</div>
+        <div class="meta-field-val" style="display: flex; align-items: center; gap: 8px;">
+          <strong style="color: #0f172a;">${escapeHtml(node.display_name || node.key_name)}</strong>
+          <button type="button" class="btn-rename-trigger" onclick="startRenamingNode()" title="Переименовать узел">✎ Переименовать</button>
+        </div>
       </div>
       ${
         node.aliases && node.aliases.length > 0

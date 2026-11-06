@@ -14,8 +14,10 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
+from src.anonymizer import anonymize_administrative, anonymize_text
 from src.config import logger, settings
 from src.db import get_db_session, get_default_profile
 from src.document_reader import read_document_text
@@ -116,6 +118,7 @@ class QuestionnaireProcessor:
         patient_name: Optional[str] = None,
         session: Optional[Session] = None,
         save_json: bool = True,
+        anonymize: bool = False,
     ) -> Dict[str, Any]:
         """Чтение файла протокола (PDF, DOCX, TXT, ODT, RTF, HTML и др.) и запуск обработки."""
         p = Path(file_path)
@@ -132,6 +135,7 @@ class QuestionnaireProcessor:
             patient_name=patient_name,
             session=session,
             save_json=save_json,
+            anonymize=anonymize,
         )
 
     def process_document(
@@ -141,6 +145,7 @@ class QuestionnaireProcessor:
         patient_name: Optional[str] = None,
         session: Optional[Session] = None,
         save_json: bool = False,
+        anonymize: bool = False,
     ) -> Dict[str, Any]:
         """Универсальная точка входа для одного анализа: принимает либо текст протокола, либо путь к файлу."""
         if os.path.exists(text_or_path) and os.path.isfile(text_or_path):
@@ -150,6 +155,7 @@ class QuestionnaireProcessor:
                 patient_name=patient_name,
                 session=session,
                 save_json=save_json,
+                anonymize=anonymize,
             )
         return self.process_questionnaire(
             text=text_or_path,
@@ -157,6 +163,7 @@ class QuestionnaireProcessor:
             patient_name=patient_name,
             session=session,
             save_json=save_json,
+            anonymize=anonymize,
         )
 
     def process_questionnaire(
@@ -166,6 +173,7 @@ class QuestionnaireProcessor:
         patient_name: Optional[str] = None,
         session: Optional[Session] = None,
         save_json: bool = False,
+        anonymize: bool = False,
     ) -> Dict[str, Any]:
         """Обработка одного протокола исследования (формат входных данных 'Лист консультативного осмотра'):
 
@@ -179,9 +187,16 @@ class QuestionnaireProcessor:
         """
         logger.info(f"--- Начало обработки протокола (пациент: {patient_id or 'автоопределение'}) ---")
 
+        anonymization_audit = None
+        working_text = text
+        if anonymize:
+            working_text, audit_info = anonymize_text(text, pseudonym=patient_id)
+            anonymization_audit = audit_info
+            logger.info(f"Выполнена деидентификация текста (скрыто {audit_info.get('masked_items', 0)} элементов ПДн).")
+
         # 1. Извлечение структурированного документа через LLM + детерминированный парсинг
         extracted_doc: ExtractedDocument = self.extractor.extract_document(
-            text=text,
+            text=working_text,
             patient_id=patient_id or "неизвестно",
         )
 
@@ -189,21 +204,25 @@ class QuestionnaireProcessor:
         if session is not None:
             return self._process_extracted_doc_in_session(
                 session=session,
-                text=text,
+                text=working_text,
                 extracted_doc=extracted_doc,
                 patient_id=patient_id,
                 patient_name=patient_name,
                 save_json=save_json,
+                anonymize=anonymize,
+                anonymization_audit=anonymization_audit,
             )
         else:
             with get_db_session() as sess:
                 return self._process_extracted_doc_in_session(
                     session=sess,
-                    text=text,
+                    text=working_text,
                     extracted_doc=extracted_doc,
                     patient_id=patient_id,
                     patient_name=patient_name,
                     save_json=save_json,
+                    anonymize=anonymize,
+                    anonymization_audit=anonymization_audit,
                 )
 
     def _parse_consultation_date(self, raw_date: Optional[str]) -> datetime:
@@ -226,6 +245,8 @@ class QuestionnaireProcessor:
         patient_id: Optional[str] = None,
         patient_name: Optional[str] = None,
         save_json: bool = False,
+        anonymize: bool = False,
+        anonymization_audit: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Внутренняя логика сохранения документа, фактов и компиляции JSON внутри активной сессии БД."""
         matcher = MatchingEngine(
@@ -235,17 +256,29 @@ class QuestionnaireProcessor:
         )
 
         admin = extracted_doc.administrative
+        if anonymize:
+            admin_dict = anonymize_administrative(admin.model_dump(), pseudonym=patient_id)
+            if "patient" in admin_dict:
+                admin.patient = admin_dict["patient"]
+            if "address" in admin_dict:
+                admin.address = admin_dict["address"]
+            if "date_of_birth" in admin_dict:
+                admin.date_of_birth = admin_dict["date_of_birth"]
 
         # Определение финальных идентификаторов пациента
-        effective_patient_id = (
-            patient_id
-            or (admin.patient if admin.patient != "---" else None)
-            or f"P-{int(datetime.now().timestamp())}"
-        )
-        effective_patient_name = (
-            patient_name
-            or (admin.patient if admin.patient != "---" else None)
-        )
+        if anonymize and patient_id:
+            effective_patient_id = patient_id
+            effective_patient_name = patient_id
+        else:
+            effective_patient_id = (
+                patient_id
+                or (admin.patient if admin.patient != "---" else None)
+                or f"P-{int(datetime.now().timestamp())}"
+            )
+            effective_patient_name = (
+                patient_name
+                or (admin.patient if admin.patient != "---" else None)
+            )
         consult_dt = self._parse_consultation_date(admin.consultation_date)
 
         # 1. Регистрация исходного документа в таблице documents
@@ -388,6 +421,11 @@ class QuestionnaireProcessor:
             conclusions=extracted_doc.conclusion,
         )
 
+        if anonymize:
+            compiled_json["anonymized"] = True
+            if anonymization_audit:
+                compiled_json["anonymization_audit"] = anonymization_audit
+
         # 5. Сохранение в кэш document_json_cache
         cache_entry = DocumentJsonCache(
             document_id=document.id,
@@ -412,7 +450,7 @@ class QuestionnaireProcessor:
             f"сопоставлено {matched_count} признаков (всего признаков: {len(extracted_doc.findings)})."
         )
 
-        return {
+        output_result = {
             "document_id": document.id,
             "patient_id": effective_patient_id,
             "patient_name": effective_patient_name or "",
@@ -425,6 +463,11 @@ class QuestionnaireProcessor:
             "saved_file": saved_file_path,
             "results": processed_details,
         }
+        if anonymize:
+            output_result["anonymized"] = True
+            output_result["anonymization_audit"] = anonymization_audit
+
+        return output_result
 
     def process_excel_file(
         self,

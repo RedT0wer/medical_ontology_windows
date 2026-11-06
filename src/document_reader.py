@@ -304,3 +304,4 @@ def read_document_text(file_path: Union[str, Path]) -> str:
         raise ValueError(f"Файл '{path.name}' не содержит извлекаемого текста (пустой документ или скан без OCR).")
 
     return cleaned
+

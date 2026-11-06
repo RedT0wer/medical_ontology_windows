@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import func
 from src.config import logger
 from src.db import get_db_session
@@ -311,16 +312,14 @@ def get_ontology_graph(
 
                 color = NODE_COLORS.get(node_type, NODE_COLORS["default"])
 
-                # Всплывающая подсказка (HTML)
+                # Всплывающая подсказка (чистый текст без HTML разметки)
+                name_str = n.display_name or n.key_name
+                unit_str = f" ({n.unit})" if n.unit else ""
                 tooltip = (
-                    f"<div style='font-family: sans-serif; min-width: 180px;'>"
-                    f"<b style='font-size: 13px;'>{n.display_name or n.key_name}</b><br/>"
-                    f"<span style='color: #64748b; font-size: 11px;'>Путь:</span> <code>{n.full_path}</code><br/>"
-                    f"<span style='color: #64748b; font-size: 11px;'>Тип:</span> <b>{n.data_type}</b>"
-                    f"{f' ({n.unit})' if n.unit else ''}<br/>"
-                    f"<span style='color: #64748b; font-size: 11px;'>Заполнено:</span> <b>{recs} из {total_docs} анкет</b><br/>"
-                    f"<div style='margin-top: 5px; color: #2563eb; font-size: 11px;'>👉 Кликните для просмотра значений по всем анкетам</div>"
-                    f"</div>"
+                    f"{name_str}\n"
+                    f"Путь: {n.full_path}\n"
+                    f"Тип: {n.data_type}{unit_str}\n"
+                    f"Заполнено: {recs} из {total_docs} анкет"
                 )
 
                 nodes.append(
@@ -645,3 +644,47 @@ def get_node_values_across_questionnaires(node_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Ошибка получения значений узла {node_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 5. ПЕРЕИМЕНОВАНИЕ УЗЛА ОНТОЛОГИИ
+# ============================================================================
+
+class RenameNodePayload(BaseModel):
+    display_name: str
+
+
+@router.post("/ontology/nodes/{node_id}/rename")
+@router.put("/ontology/nodes/{node_id}/rename")
+def rename_ontology_node(node_id: str, payload: RenameNodePayload) -> Dict[str, Any]:
+    """Обновление пользовательского наименования (display_name) узла онтологии."""
+    new_name = payload.display_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Наименование не может быть пустым.")
+
+    with get_db_session() as session:
+        node = None
+        if node_id.isdigit():
+            node = session.query(FeatureNode).filter(FeatureNode.id == int(node_id)).first()
+        if not node:
+            node = session.query(FeatureNode).filter(FeatureNode.full_path == node_id).first()
+
+        if not node:
+            raise HTTPException(status_code=404, detail=f"Узел онтологии '{node_id}' не найден.")
+
+        old_name = node.display_name or node.key_name
+        node.display_name = new_name
+        session.commit()
+        session.refresh(node)
+
+        logger.info(f"Узел #{node.id} ('{node.full_path}') переименован: '{old_name}' -> '{new_name}'")
+
+        return {
+            "status": "ok",
+            "id": node.id,
+            "full_path": node.full_path,
+            "display_name": node.display_name,
+            "key_name": node.key_name,
+            "message": f"Узел успешно переименован в '{new_name}'",
+        }
+

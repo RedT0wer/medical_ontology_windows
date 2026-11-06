@@ -132,6 +132,8 @@ class FeatureNode(Base):
     values: Mapped[List["DocumentValue"]] = relationship(
         "DocumentValue",
         back_populates="feature",
+        cascade="all, delete",
+        passive_deletes=True,
         lazy="selectin",
     )
 

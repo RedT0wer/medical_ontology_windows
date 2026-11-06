@@ -41,7 +41,7 @@ class TestCLI(unittest.TestCase):
     def test_cli_argument_parsing_subcommands(self):
         """Проверка разбора аргументов всех подкоманд CLI."""
         # 1. process
-        with patch("sys.argv", ["cli.py", "process", "protocol.txt", "--patient-id", "PAT-1"]):
+        with patch("sys.argv", ["cli.py", "process", "--dir", "protocols_dir", "--patient-id", "PAT-1"]):
             with patch("cli.cmd_process") as mock_cmd:
                 mock_cmd.return_value = None
                 cli.main()
@@ -146,6 +146,35 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(len(results), 3)
             processed_exts = {Path(r["file"]).suffix.lower() for r in results}
             self.assertEqual(processed_exts, {".txt", ".docx", ".pdf"})
+
+    def test_cmd_process_requires_dir_flag(self):
+        """Проверка требования флага --dir при вызове cmd_process."""
+        args = MagicMock()
+        args.dir = None
+        args.json = False
+
+        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+            with self.assertRaises(SystemExit) as cm:
+                cli.cmd_process(args)
+            self.assertEqual(cm.exception.code, 1)
+            err_msg = mock_stderr.getvalue()
+            self.assertIn("отправляется не отдельный файл, а именно директория", err_msg)
+            self.assertIn("Требуется указать параметр --dir", err_msg)
+
+    def test_cmd_process_rejects_file_in_dir_flag(self):
+        """Проверка отклонения вызова, если флаг --dir указывает на отдельный файл, а не директорию."""
+        with tempfile.NamedTemporaryFile() as tmp_file:
+            args = MagicMock()
+            args.dir = tmp_file.name
+            args.json = False
+
+            with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+                with self.assertRaises(SystemExit) as cm:
+                    cli.cmd_process(args)
+                self.assertEqual(cm.exception.code, 1)
+                err_msg = mock_stderr.getvalue()
+                self.assertIn("отправляется не файл, а именно директория", err_msg)
+                self.assertIn("является файлом", err_msg)
 
 
 if __name__ == "__main__":

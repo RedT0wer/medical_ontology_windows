@@ -159,6 +159,12 @@ class TestWebApp(BaseTestCase):
             self.assertIn(node1.id, node_ids)
             self.assertIn(node2.id, node_ids)
 
+            # Проверка отсутствия сырого HTML в подсказках title
+            for n in data["nodes"]:
+                if "title" in n and n["title"]:
+                    self.assertNotIn("<div", n["title"])
+                    self.assertNotIn("<span", n["title"])
+
     def test_get_node_values_across_questionnaires(self):
         """Проверка мини-таблицы значений признака у всех пациентов."""
         doc1 = Document(profile_id=self.default_profile.id, patient_id="P1", raw_text="..")
@@ -208,6 +214,61 @@ class TestWebApp(BaseTestCase):
             self.assertIn("36.8", docs["P1"]["value"])
             self.assertFalse(docs["P2"]["is_present"])
             self.assertIsNone(docs["P2"]["value"])
+
+    def test_rename_ontology_node_success(self):
+        """Проверка успешного переименования узла онтологии через API."""
+        node = FeatureNode(
+            profile_id=self.default_profile.id,
+            key_name="duodenitis",
+            full_path="digestive_system.duodenitis",
+            display_name="Duodenitis",
+            data_type="string",
+            is_leaf=True,
+        )
+        self.session.add(node)
+        self.session.commit()
+
+        with patch("src.web.routes.get_db_session", side_effect=self._test_db_session):
+            response = self.client.post(
+                f"/api/ontology/nodes/{node.id}/rename",
+                json={"display_name": "Дуоденит (воспаление 12-перстной кишки)"},
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["status"], "ok")
+            self.assertEqual(data["display_name"], "Дуоденит (воспаление 12-перстной кишки)")
+
+            # Проверка обновления в БД
+            self.session.refresh(node)
+            self.assertEqual(node.display_name, "Дуоденит (воспаление 12-перстной кишки)")
+
+    def test_rename_ontology_node_validation(self):
+        """Проверка валидации при переименовании узла (пустое имя, несуществующий узел)."""
+        node = FeatureNode(
+            profile_id=self.default_profile.id,
+            key_name="gastritis",
+            full_path="digestive_system.gastritis",
+            display_name="Гастрит",
+            data_type="string",
+            is_leaf=True,
+        )
+        self.session.add(node)
+        self.session.commit()
+
+        with patch("src.web.routes.get_db_session", side_effect=self._test_db_session):
+            # Пустое имя -> 400
+            resp_empty = self.client.post(
+                f"/api/ontology/nodes/{node.id}/rename",
+                json={"display_name": "   "},
+            )
+            self.assertEqual(resp_empty.status_code, 400)
+
+            # Несуществующий узел -> 404
+            resp_404 = self.client.post(
+                "/api/ontology/nodes/999999/rename",
+                json={"display_name": "Новое имя"},
+            )
+            self.assertEqual(resp_404.status_code, 404)
 
 
 if __name__ == "__main__":
