@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 # Регулярные выражения для детекции персональных данных
 RE_SNILS: Pattern = re.compile(
-    r"\b\d{3}[-\s]\d{3}[-\s]\d{3}[-\s]\d{2}\b"
+    r"\b(?:\d{3}[-\s.]\d{3}[-\s.]\d{3}[-\s.]\d{2}|(?:СНИЛС\s*:?\s*)\d{11})\b",
+    re.IGNORECASE,
 )
 
 RE_PASSPORT_RF: Pattern = re.compile(
@@ -30,12 +31,12 @@ RE_PASSPORT_RF: Pattern = re.compile(
 )
 
 RE_OMS_POLIS: Pattern = re.compile(
-    r"\b(?:полис(?:\s*ОМС|\s*ДМС)?\s*:?\s*)?\d{16}\b",
+    r"\b(?:(?:полис(?:\s*(?:ОМС|ДМС))?\s*:?\s*)?(?:\d{16}|\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}))\b",
     re.IGNORECASE,
 )
 
 RE_PHONE: Pattern = re.compile(
-    r"(?:\+7|8)[\s\-(]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}\b"
+    r"(?:\+7|8)[\s\-(.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{2}[\s\-.]?\d{2}\b"
 )
 
 RE_EMAIL: Pattern = re.compile(
@@ -43,17 +44,20 @@ RE_EMAIL: Pattern = re.compile(
 )
 
 RE_BIRTH_DATE: Pattern = re.compile(
-    r"(?:(?:дата\s*рождения|д\.?\s*р\.?|род\.?)\s*:?\s*)(\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b)",
+    r"(?:(?:дата\s*рождения|д\.?\s*р\.?|род\.?|родился|родилась|г\.?\s*р\.?)\s*:?\s*)"
+    r"(\b\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}\b|\b(?:19\d{2}|20\d{2})\s*(?:г\.?|года)?\b)",
     re.IGNORECASE,
 )
 
 RE_ADDRESS: Pattern = re.compile(
-    r"(?:(?:адрес|прожив\.|проживание|регистрация|зарег\.)\s*:?\s*)([^\n\r]+)",
+    r"(?:(?:адрес(?:\s*регистрации|\s*проживания)?|прожив\.|проживание|регистрация|зарег\.)\s*:?\s*)"
+    r"([^\n\r]+?)(?=(?:\s+[А-ЯЁ][а-яё]{2,}\s*:|\n|$))",
     re.IGNORECASE,
 )
 
 RE_FIO_PREFIX: Pattern = re.compile(
-    r"(?:(?:пациент(?:ка)?|больной(?:ая)?|фио|ф\.и\.о\.)\s*:?\s*)([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})",
+    r"(?:(?:пациент(?:ка|а|ки)?|больн(?:ой|ая|ого|ую)|обследуем(?:ый|ая|ого|ую)|исследуем(?:ый|ая|ого|ую)|фио|ф\.и\.о\.)\s*:?\s*)"
+    r"([А-ЯЁ][а-яёА-ЯЁ]+(?:\s+[А-ЯЁ][а-яёА-ЯЁ]+|\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.|\s+[А-ЯЁ]\.){1,2})",
     re.IGNORECASE,
 )
 
@@ -68,12 +72,14 @@ class DataAnonymizer:
         self,
         text: str,
         pseudonym: Optional[str] = None,
+        known_fio: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Маскирование персональных данных в сыром тексте протокола.
 
         Args:
             text: Исходный текст медицинского документа.
             pseudonym: Пользовательский псевдоним пациента (например 'PATIENT_001').
+            known_fio: Известное ФИО пациента (из метаданных или имени файла).
 
         Returns:
             Tuple[str, Dict[str, Any]]: (Анонимизированный текст, отчет о скрытых ПДн)
@@ -161,6 +167,24 @@ class DataAnonymizer:
 
         cleaned = RE_ADDRESS.sub(_replace_address, cleaned)
 
+        # 9. Маскирование всех последующих упоминаний найденных ФИО в тексте
+        if known_fio:
+            audit["fio"].append(known_fio.strip())
+
+        for found_fio in list(audit["fio"]):
+            cleaned_fio = found_fio.strip()
+            if not cleaned_fio or len(cleaned_fio) < 3:
+                continue
+            cleaned = re.sub(rf"\b{re.escape(cleaned_fio)}\b", pat_placeholder, cleaned)
+            tokens = cleaned_fio.split()
+            if len(tokens) >= 2:
+                surname = tokens[0]
+                if len(tokens) >= 3 and len(tokens[1]) > 0 and len(tokens[2]) > 0:
+                    init_compact = f"{surname} {tokens[1][0]}.{tokens[2][0]}."
+                    init_spaced = f"{surname} {tokens[1][0]}. {tokens[2][0]}."
+                    cleaned = re.sub(rf"\b{re.escape(init_compact)}(?!\w)", pat_placeholder, cleaned)
+                    cleaned = re.sub(rf"\b{re.escape(init_spaced)}(?!\w)", pat_placeholder, cleaned)
+
         total_masked = sum(len(v) for v in audit.values())
         return cleaned, {
             "masked_items": total_masked,
@@ -203,9 +227,13 @@ class DataAnonymizer:
 _default_anonymizer = DataAnonymizer()
 
 
-def anonymize_text(text: str, pseudonym: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
+def anonymize_text(
+    text: str,
+    pseudonym: Optional[str] = None,
+    known_fio: Optional[str] = None,
+) -> Tuple[str, Dict[str, Any]]:
     """Функция быстрого маскирования персональных данных в тексте."""
-    return _default_anonymizer.anonymize_text(text=text, pseudonym=pseudonym)
+    return _default_anonymizer.anonymize_text(text=text, pseudonym=pseudonym, known_fio=known_fio)
 
 
 def anonymize_administrative(admin_data: Dict[str, Any], pseudonym: Optional[str] = None) -> Dict[str, Any]:
