@@ -20,6 +20,11 @@ import sys
 from typing import Any, Dict, List, Optional
 from src.config import logger, settings
 from src.db import get_db_session, init_db
+from src.document_reader import (
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    read_document_text,
+    read_text_file as _read_text_file,
+)
 from src.export import export_dataset, load_feature_config
 from src.matcher import MatchingEngine
 from src.models import (
@@ -53,14 +58,8 @@ def configure_cli_logging(json_mode: bool) -> None:
 
 
 def read_text_file(path: Path) -> str:
-    """Чтение текстового файла с автоматическим определением кодировки (utf-8 / cp1251)."""
-    for enc in ("utf-8", "cp1251", "utf-8-sig"):
-        try:
-            with open(path, "r", encoding=enc) as f:
-                return f.read()
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"Не удалось декодировать файл: {path}")
+    """Чтение текстового файла (обратная совместимость)."""
+    return _read_text_file(path)
 
 
 def process_single_file(
@@ -70,8 +69,11 @@ def process_single_file(
     save_json: bool = True,
     output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Обработка одного файла протокола."""
-    content = read_text_file(file_path)
+    """Обработка одного файла протокола (PDF, DOCX, TXT, ODT, RTF, HTML, JSON и др.).
+    
+    Принцип: один файл = одна анкета.
+    """
+    content = read_document_text(file_path)
     # Если patient_id не задан явно, пробуем взять имя файла без расширения
     inferred_id = patient_id or file_path.stem
 
@@ -102,16 +104,17 @@ def process_directory(
     output_dir: Optional[str] = None,
     json_mode: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Пакетная обработка всех файлов протоколов в указанной директории."""
+    """Пакетная обработка всех файлов протоколов в указанной директории (PDF, DOCX, TXT, RTF, ODT и др.)."""
     pattern = "**/*" if recursive else "*"
     all_files = [
         p for p in dir_path.glob(pattern)
-        if p.is_file() and p.suffix.lower() in (".txt", ".text", ".md", ".log")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_DOCUMENT_EXTENSIONS
     ]
     all_files.sort()
 
     if not all_files:
-        sys.stderr.write(f"В директории {dir_path} не найдено текстовых файлов (.txt, .text, .md).\n")
+        supported_str = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
+        sys.stderr.write(f"В директории {dir_path} не найдено поддерживаемых файлов протоколов ({supported_str}).\n")
         return []
 
     if not json_mode:
@@ -414,20 +417,20 @@ def main():
     p_proc = subparsers.add_parser(
         "process",
         parents=[parent_parser],
-        help="Обработка клинического протокола (файл, папка или сырой текст)",
+        help="Обработка клинического протокола (PDF, DOCX, TXT, ODT, RTF, HTML, папка или сырой текст)",
     )
     p_proc.add_argument(
         "input_path",
         nargs="?",
         default=None,
-        help="Путь к файлу протокола (например: '1 copy.txt') или папке с файлами",
+        help="Путь к файлу протокола (PDF, DOCX, TXT, RTF, ODT, HTML, JSON и др.) или папке с файлами",
     )
     p_proc.add_argument(
         "--file",
         "-f",
         type=str,
         default=None,
-        help="Явный путь к файлу протокола для обработки",
+        help="Явный путь к файлу протокола для обработки (PDF, DOCX, TXT, ODT, RTF, HTML, JSON)",
     )
     p_proc.add_argument(
         "--dir",

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from src.config import logger, settings
 from src.db import get_db_session, get_default_profile
+from src.document_reader import read_document_text
 from src.embeddings import BaseEmbeddingProvider, get_embedding_provider
 from src.extractor import AdministrativeInfo, EntityExtractor, ExtractedDocument, ExtractedEntity
 from src.matcher import MatchDecision, MatchingEngine
@@ -116,23 +117,13 @@ class QuestionnaireProcessor:
         session: Optional[Session] = None,
         save_json: bool = True,
     ) -> Dict[str, Any]:
-        """Чтение текстового файла протокола (например, '1 copy.txt') и запуск обработки."""
+        """Чтение файла протокола (PDF, DOCX, TXT, ODT, RTF, HTML и др.) и запуск обработки."""
         p = Path(file_path)
         if not p.exists():
             raise FileNotFoundError(f"Файл протокола не найден: {file_path}")
 
-        # Чтение файла с поддержкой utf-8 и fallback на cp1251
-        text_content = ""
-        for encoding in ("utf-8", "cp1251", "utf-8-sig"):
-            try:
-                with open(p, "r", encoding=encoding) as f:
-                    text_content = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if not text_content:
-            raise ValueError(f"Не удалось прочитать содержимое файла {file_path} (пустой или неподдерживаемая кодировка).")
+        # Универсальное извлечение текста с автоопределением формата и кодировки
+        text_content = read_document_text(p)
 
         logger.info(f"Загружен файл протокола: {p.name} ({len(text_content)} симв.)")
         return self.process_questionnaire(

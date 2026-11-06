@@ -99,5 +99,54 @@ class TestCLI(unittest.TestCase):
                 mock_run.assert_called_once_with(host="0.0.0.0", port=9000, reload=True)
 
 
+    def test_process_single_file_multiformat(self):
+        """Проверка вызова process_single_file для разных форматов файлов (PDF, DOCX, TXT)."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_p = Path(tmp_dir) / "protocol.pdf"
+            file_p.write_bytes(b"%PDF-1.4 dummy")
+
+            mock_processor = MagicMock()
+            mock_processor.process_questionnaire.return_value = {
+                "patient_id": "P-PDF",
+                "total_extracted": 3,
+                "new_features": 1,
+                "compiled_json": {"status": "ok"},
+            }
+
+            with patch("cli.read_document_text", return_value="Текст извлеченного PDF протокола"):
+                res = cli.process_single_file(file_p, mock_processor, save_json=False)
+
+            self.assertEqual(res["patient_id"], "P-PDF")
+            mock_processor.process_questionnaire.assert_called_once_with(
+                text="Текст извлеченного PDF протокола",
+                patient_id="protocol",
+                save_json=False,
+            )
+
+    def test_process_directory_multiformat(self):
+        """Проверка пакетной обработки файлов разных форматов (.pdf, .docx, .txt)."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dir_p = Path(tmp_dir)
+            (dir_p / "doc1.txt").write_text("Текст 1", encoding="utf-8")
+            (dir_p / "doc2.docx").write_bytes(b"PK dummy docx")
+            (dir_p / "doc3.pdf").write_bytes(b"%PDF dummy")
+            (dir_p / "ignore.exe").write_bytes(b"MZ binary")
+
+            mock_processor = MagicMock()
+            mock_processor.process_questionnaire.return_value = {
+                "patient_id": "PID",
+                "total_extracted": 1,
+                "new_features": 0,
+                "compiled_json": {},
+            }
+
+            with patch("cli.read_document_text", return_value="Текст протокола"):
+                results = cli.process_directory(dir_p, mock_processor, save_json=False, json_mode=True)
+
+            self.assertEqual(len(results), 3)
+            processed_exts = {Path(r["file"]).suffix.lower() for r in results}
+            self.assertEqual(processed_exts, {".txt", ".docx", ".pdf"})
+
+
 if __name__ == "__main__":
     unittest.main()
