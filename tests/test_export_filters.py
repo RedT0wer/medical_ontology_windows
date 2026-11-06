@@ -161,6 +161,154 @@ class TestExportFilters(BaseTestCase):
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]["patient_id"], "PAT_02")
 
+    def test_parse_flexible_date_all_formats(self):
+        """Проверка парсинга всех поддерживаемых форматов дат и валидации ошибок."""
+        from src.export import parse_flexible_date
+
+        # ISO и стандартные даты
+        dt1 = parse_flexible_date("2024-05-20")
+        self.assertEqual((dt1.year, dt1.month, dt1.day), (2024, 5, 20))
+
+        # Российский формат DD.MM.YYYY
+        dt2 = parse_flexible_date("20.05.2024")
+        self.assertEqual((dt2.year, dt2.month, dt2.day), (2024, 5, 20))
+
+        # Дата с временем
+        dt3 = parse_flexible_date("2024-05-20 14:30:15")
+        self.assertEqual((dt3.hour, dt3.minute, dt3.second), (14, 30, 15))
+
+        dt4 = parse_flexible_date("20.05.2024 14:30")
+        self.assertEqual((dt4.hour, dt4.minute), (14, 30))
+
+        # ISO 8601 с 'T'
+        dt5 = parse_flexible_date("2024-05-20T14:30:15.123456")
+        self.assertEqual(dt5.microsecond, 123456)
+
+        # Передача уже готового объекта datetime
+        now = datetime.now()
+        self.assertEqual(parse_flexible_date(now), now)
+
+        # Некорректный формат
+        with self.assertRaises(ValueError):
+            parse_flexible_date("не_является_датой")
+
+    def test_filter_combined_all_criteria(self):
+        """Проверка одновременного применения всех критериев фильтрации."""
+        features = ["patient_id", "doctor", "institution", "liver.size"]
+        # Ищем: Иванов + Городская больница №1 + Гепатомегалия + диапазон дат
+        df = build_dataset_dataframe(
+            session=self.session,
+            features=features,
+            from_date="2024-01-01",
+            to_date="2024-01-31",
+            filter_diagnosis="гепатомегалия",
+            filter_doctor="Иванов",
+            filter_institution="Городская больница №1",
+        )
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]["patient_id"], "PAT_01")
+        self.assertAlmostEqual(df.iloc[0]["liver.size"], 145.0)
+
+    def test_filter_no_matches_empty_df(self):
+        """Проверка возврата корректного пустого DataFrame при отсутствии совпадений."""
+        features = ["patient_id", "doctor", "liver.size"]
+        df = build_dataset_dataframe(
+            session=self.session,
+            features=features,
+            from_date="2099-01-01",  # Далекое будущее
+        )
+        self.assertEqual(len(df), 0)
+        self.assertEqual(list(df.columns), features)
+
+    def test_filter_diagnosis_case_insensitivity_and_sources(self):
+        """Проверка регистронезависимости и поиска диагноза в разных источниках."""
+        # 1. Верхний регистр в запросе
+        df_upper = build_dataset_dataframe(
+            session=self.session,
+            features=["patient_id"],
+            filter_diagnosis="ХОЛЕЦИСТИТ",
+        )
+        self.assertEqual(len(df_upper), 1)
+        self.assertEqual(df_upper.iloc[0]["patient_id"], "PAT_02")
+
+        # 2. Поиск диагноза из сырого текста документа
+        doc_raw = Document(
+            profile_id=self.default_profile.id,
+            patient_id="PAT_RAW",
+            raw_text="Пациент направлен с подозрением на аппендицит острый.",
+            administrative={},
+        )
+        self.session.add(doc_raw)
+        self.session.commit()
+
+        df_raw = build_dataset_dataframe(
+            session=self.session,
+            features=["patient_id"],
+            filter_diagnosis="аппендицит",
+        )
+        self.assertEqual(len(df_raw), 1)
+        self.assertEqual(df_raw.iloc[0]["patient_id"], "PAT_RAW")
+
+    def test_export_dataset_file_formats_with_filters(self):
+        """Проверка сборки файла датасета с фильтрацией через export_dataset и CLI cmd_export."""
+        import argparse
+        import io
+        import json
+        from unittest.mock import patch
+        import yaml
+        import cli
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            cfg_path = tmp_p / "features.yaml"
+            cfg_path.write_text(
+                yaml.dump({
+                    "features": ["patient_id", "doctor", "liver.size"],
+                    "output": str(tmp_p / "dataset.csv"),
+                    "format": "csv",
+                }),
+                encoding="utf-8",
+            )
+
+            # 1. Вызов export_dataset с фильтром по врачу
+            with patch("src.export.get_db_session") as mock_db:
+                mock_db.return_value.__enter__.return_value = self.session
+                res = export_dataset(
+                    config=str(cfg_path),
+                    filter_doctor="Иванов",
+                )
+                self.assertEqual(res["status"], "ok")
+                self.assertEqual(res["total_documents"], 2)
+                self.assertTrue(Path(res["file"]).exists())
+
+                # Читаем получившийся CSV и проверяем состав
+                df_csv = pd.read_csv(res["file"])
+                self.assertEqual(len(df_csv), 2)
+                self.assertEqual(set(df_csv["patient_id"]), {"PAT_01", "PAT_03"})
+
+            # 2. Интеграция с CLI cmd_export
+            out_cli = tmp_p / "cli_dataset.csv"
+            cli_args = argparse.Namespace(
+                config=str(cfg_path),
+                config_pos=None,
+                output=str(out_cli),
+                format="csv",
+                from_date="2024-02-01",
+                to_date="2024-02-28",
+                filter_diagnosis=None,
+                filter_doctor=None,
+                filter_institution=None,
+                json=True,
+            )
+            with patch("src.export.get_db_session") as mock_db:
+                mock_db.return_value.__enter__.return_value = self.session
+                with patch("sys.stdout", new=io.StringIO()) as fake_out:
+                    cli.cmd_export(cli_args)
+                    cli_res = json.loads(fake_out.getvalue())
+                    self.assertEqual(cli_res["status"], "ok")
+                    self.assertEqual(cli_res["total_documents"], 1)
+                    self.assertTrue(out_cli.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

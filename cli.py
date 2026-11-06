@@ -531,6 +531,8 @@ def cmd_ontology_merge(args) -> None:
 
         src_path = src_node.full_path
         tgt_path = tgt_node.full_path
+        src_node.values.clear()
+        session.flush()
         session.delete(src_node)
         session.commit()
 
